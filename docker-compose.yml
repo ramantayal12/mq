@@ -1,0 +1,21 @@
+# Run the broker with: docker compose up --build
+# Then point any Kafka client at localhost:9092.
+services:
+  mq:
+    build: .
+    image: mq:latest
+    ports:
+      - "9092:9092"
+    environment:
+      MQ_LISTENERS: "0.0.0.0:9092"
+      # Clients receive this host:port in Metadata and reconnect to it, so it must be
+      # reachable from where the client runs (the host, here).
+      MQ_ADVERTISED_LISTENERS: "localhost:9092"
+      MQ_LOG_DIRS: "/var/lib/mq"
+      MQ_NUM_PARTITIONS: "3"
+      MQ_AUTO_CREATE_TOPICS: "true"
+    volumes:
+      - mq-data:/var/lib/mq
+
+volumes:
+  mq-data:
