@@ -98,8 +98,8 @@ GitHub Container Registry on every push to `main` and on every semver tag.
 ### Pull the image
 
 ```bash
-docker pull ghcr.io/ramantayal/mq:latest      # latest from main
-docker pull ghcr.io/ramantayal/mq:0.1.0        # pinned version
+docker pull ghcr.io/ramantayal12/mq:latest      # latest from main
+docker pull ghcr.io/ramantayal12/mq:0.1.0        # pinned version
 ```
 
 ### Replace Kafka in docker-compose
@@ -121,7 +121,7 @@ services:
 # After (mq — drop-in replacement, no ZooKeeper needed)
 services:
   kafka:
-    image: ghcr.io/ramantayal/mq:latest
+    image: ghcr.io/ramantayal12/mq:latest
     ports:
       - "9092:9092"
     environment:
@@ -142,7 +142,7 @@ Update the container image in your Deployment or StatefulSet:
 ```yaml
 containers:
   - name: kafka
-    image: ghcr.io/ramantayal/mq:0.1.0   # was: confluentinc/cp-kafka:7.6.0
+    image: ghcr.io/ramantayal12/mq:0.1.0   # was: confluentinc/cp-kafka:7.6.0
     ports:
       - containerPort: 9092
     env:
