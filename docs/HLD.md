@@ -11,8 +11,13 @@ The goal is to demonstrate Kafka's core mechanics with the smallest faithful sur
 
 - **In scope:** the binary wire protocol, topics, partitions, an append-only segmented
   on-disk log (SSD storage), producers, consumers, and consumer groups with committed offsets.
-- **Out of scope:** replication, multi-broker clustering, transactions / idempotent producers,
-  exactly-once semantics, SASL/TLS auth, KRaft/ZooKeeper, log compaction, quotas. See §8.
+- **Out of scope:** transactions / idempotent producers, exactly-once semantics, SASL/TLS
+  auth, log compaction, quotas. See §8.
+- **In active development (Workstream D):** replication with automatic failover, via an
+  embedded Raft metadata controller (`hashicorp/raft` + `raft-boltdb/v2`) — the project's
+  first external runtime dependencies. This supersedes the former replication-factor-1
+  static-placement model (§9) and the prior "no replication / no external broker deps"
+  non-goals; see §8 and [docs/GAPS_PLAN.md](GAPS_PLAN.md).
 
 ## 2. The four foundational decisions
 
@@ -108,9 +113,15 @@ as `Appender`/`LogReader`/`Coordinator`, not concretes — so tests inject fakes
 
 ## 8. Non-goals (explicitly out of scope)
 
-Replication / multi-broker, transactions & idempotent producer, exactly-once, SASL/TLS,
-KRaft/ZooKeeper metadata quorum, log compaction, quotas, schema registry, flexible-version
-(compact/tagged) wire encodings, and server-side partition assignors.
+Transactions & idempotent producer, exactly-once, SASL/TLS, log compaction, quotas, schema
+registry, flexible-version (compact/tagged) wire encodings, and server-side partition assignors.
+
+**Amended (Workstream D).** Replication and multi-broker failover are no longer non-goals.
+They are being added via an embedded Raft metadata controller that plays the role KRaft
+plays in Kafka, which introduces the project's first external runtime dependencies —
+`github.com/hashicorp/raft` and `github.com/hashicorp/raft-boltdb/v2`. This is a deliberate,
+accepted break from the original "no external broker deps / no KRaft-style metadata quorum"
+stance. See [docs/GAPS_PLAN.md](GAPS_PLAN.md) for the phased plan.
 
 ## 9. Horizontal scaling (cluster mode)
 

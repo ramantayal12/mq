@@ -147,12 +147,13 @@ func (h *Handler) metadata(version int16, r *kbytes.Reader) []byte {
 	for _, t := range topics {
 		mt := protocol.MetadataTopic{Name: t.name}
 		for p := int32(0); p < t.np; p++ {
-			leader := cl.LeaderFor(t.name, p)
+			leader, epoch, replicas, isr := h.broker.PartitionMeta(t.name, p)
 			mt.Partitions = append(mt.Partitions, protocol.MetadataPartition{
-				Index:    p,
-				Leader:   leader,
-				Replicas: []int32{leader},
-				Isr:      []int32{leader},
+				Index:       p,
+				Leader:      leader,
+				LeaderEpoch: epoch,
+				Replicas:    replicas,
+				Isr:         isr,
 			})
 		}
 		resp.Topics = append(resp.Topics, mt)

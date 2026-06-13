@@ -13,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"mq/internal/cluster"
 	"mq/internal/config"
+	"mq/internal/controller"
 	"mq/internal/storage"
 )
 
@@ -32,14 +34,21 @@ type TopicInfo struct {
 }
 
 // Broker tracks the topic catalog (topic -> partition count) and holds storage logs
-// only for partitions this node leads.
+// for partitions this node replicates.
+//
+// Placement has two modes. Without a controller (single-node, or the static-membership
+// cluster) the pure-function cluster view decides leadership (replication factor 1).
+// With a controller wired in (SetController), the Raft FSM is authoritative: topic
+// creation is proposed through the controller, and this node opens a log for every
+// partition it replicates (leader or follower) by reconciling against the FSM.
 type Broker struct {
 	cfg     config.Config
 	logCfg  storage.Config
 	cluster *cluster.Cluster
+	ctrl    *controller.Controller // nil unless cluster mode wires in the Raft controller
 	mu      sync.RWMutex
 	catalog map[string]int32                  // topic -> partition count (cluster-wide)
-	logs    map[string]map[int32]*storage.Log // topic -> partition -> local log (led only)
+	logs    map[string]map[int32]*storage.Log // topic -> partition -> local log
 }
 
 // New constructs the broker over the given cluster view and loads topics already on
@@ -67,6 +76,121 @@ func (b *Broker) Cluster() *cluster.Cluster { return b.cluster }
 // NodeID is this broker's id.
 func (b *Broker) NodeID() int32 { return b.cluster.Self() }
 
+// topicApplyWait bounds how long a create waits for the local FSM to reflect a commit
+// (a follower applies asynchronously after the leader commits).
+const topicApplyWait = 3 * time.Second
+
+// SetController switches the broker to FSM-backed placement: subsequent topic creation
+// is proposed through the controller, and the broker reconciles its local logs against
+// the committed placement on every apply. Called once at startup, before serving.
+func (b *Broker) SetController(ctrl *controller.Controller) {
+	b.mu.Lock()
+	b.ctrl = ctrl
+	b.mu.Unlock()
+	ctrl.FSM().SetOnApply(b.reconcileFromFSM)
+	b.reconcileFromFSM() // adopt any state replayed/restored before the hook was registered
+}
+
+// replicationFactor is the configured RF clamped to [1, quorum size].
+func (b *Broker) replicationFactor() int32 {
+	rf := b.cfg.ReplicationFactor
+	if rf < 1 {
+		rf = 1
+	}
+	if n := int32(b.cluster.Size()); rf > n {
+		rf = n
+	}
+	return rf
+}
+
+// reconcileFromFSM opens a local log for every partition this node replicates per the
+// committed FSM placement. It is the follower's path to a present-but-unwritten .log
+// (Phase 3's fetcher fills follower logs; produce only ever writes the leader's). Fired
+// after each FSM apply/restore and once at SetController. Best-effort: a transient open
+// failure is retried on the next apply.
+func (b *Broker) reconcileFromFSM() {
+	if b.ctrl == nil {
+		return
+	}
+	self := b.cluster.Self()
+	topics := b.ctrl.FSM().Topics()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, tv := range topics {
+		for p := range tv.Parts {
+			if containsNode(tv.Parts[p].Replicas, self) {
+				_, _ = b.openLocked(tv.Name, int32(p))
+			}
+		}
+	}
+}
+
+// PartitionMeta returns the placement a Metadata response advertises for one partition:
+// leader, leader-epoch, replica set and ISR. With a controller it reads the committed
+// FSM state (falling back to the placement seed before the topic is committed locally);
+// without one it reports the single-replica cluster placement.
+func (b *Broker) PartitionMeta(topic string, p int32) (leader, epoch int32, replicas, isr []int32) {
+	if b.ctrl != nil {
+		if pv, ok := b.ctrl.FSM().Partition(topic, p); ok {
+			return pv.Leader, pv.LeaderEpoch, pv.Replicas, pv.ISR
+		}
+	}
+	leader = b.cluster.LeaderFor(topic, p)
+	return leader, 0, []int32{leader}, []int32{leader}
+}
+
+// leads reports whether this node is the serving leader for (topic, partition): the FSM
+// leader in controller mode, else the pure-function placement.
+func (b *Broker) leads(topic string, p int32) bool {
+	if b.ctrl != nil {
+		pv, ok := b.ctrl.FSM().Partition(topic, p)
+		return ok && pv.Leader == b.cluster.Self()
+	}
+	return b.cluster.IsLeader(topic, p)
+}
+
+// proposeCreate commits a CmdCreateTopic (with RF replica sets seeded from the cluster
+// view) through the controller, then waits for the local FSM to reflect it and opens any
+// logs this node now replicates. An "already exists" race is treated as success.
+func (b *Broker) proposeCreate(name string) error {
+	np := b.cfg.NumPartitions
+	if np <= 0 {
+		np = 1
+	}
+	rf := b.replicationFactor()
+	replicas := make([][]int32, np)
+	for p := int32(0); p < np; p++ {
+		replicas[p] = b.cluster.ReplicasFor(name, p, rf)
+	}
+	err := b.ctrl.Apply(controller.Command{Type: controller.CmdCreateTopic, Topic: name, Replicas: replicas})
+	if err != nil && !b.ctrl.FSM().HasTopic(name) {
+		return err
+	}
+	b.waitTopic(name)
+	b.reconcileFromFSM()
+	return nil
+}
+
+// waitTopic blocks (bounded) until the local FSM reflects the named topic.
+func (b *Broker) waitTopic(name string) {
+	deadline := time.Now().Add(topicApplyWait)
+	for time.Now().Before(deadline) {
+		if b.ctrl.FSM().HasTopic(name) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func containsNode(ids []int32, id int32) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
 // AdvertisedHost/Port expose how clients should reconnect to this broker.
 func (b *Broker) AdvertisedHost() string { return b.cfg.AdvertisedHost }
 func (b *Broker) AdvertisedPort() int32  { return b.cfg.AdvertisedPort }
@@ -87,6 +211,12 @@ func (b *Broker) DataDir() string  { return b.cfg.LogDirs }
 // recorded count; unknown topics default to the cluster-wide configured count (which
 // must be identical on every broker so placement stays consistent).
 func (b *Broker) NumPartitions(topic string) int32 {
+	if b.ctrl != nil {
+		if n, ok := b.ctrl.FSM().Partitions(topic); ok {
+			return n
+		}
+		return b.cfg.NumPartitions
+	}
 	b.mu.RLock()
 	n, ok := b.catalog[topic]
 	b.mu.RUnlock()
@@ -100,6 +230,14 @@ func (b *Broker) NumPartitions(topic string) int32 {
 // cluster this is each broker's local view (a broker learns a topic when it leads one
 // of its partitions or serves a metadata request for it).
 func (b *Broker) KnownTopics() []TopicInfo {
+	if b.ctrl != nil {
+		tvs := b.ctrl.FSM().Topics() // already sorted by name
+		out := make([]TopicInfo, 0, len(tvs))
+		for _, tv := range tvs {
+			out = append(out, TopicInfo{Name: tv.Name, Partitions: tv.Partitions})
+		}
+		return out
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	out := make([]TopicInfo, 0, len(b.catalog))
@@ -112,6 +250,9 @@ func (b *Broker) KnownTopics() []TopicInfo {
 
 // Knows reports whether the topic is in this broker's catalog.
 func (b *Broker) Knows(topic string) bool {
+	if b.ctrl != nil {
+		return b.ctrl.FSM().HasTopic(topic)
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	_, ok := b.catalog[topic]
@@ -123,6 +264,12 @@ func (b *Broker) Knows(topic string) bool {
 // default so every broker agrees without a controller (custom counts need consensus,
 // which is out of scope); a single-node cluster honors the requested count.
 func (b *Broker) CreateTopic(name string, partitions int32) error {
+	if b.ctrl != nil {
+		if b.ctrl.FSM().HasTopic(name) {
+			return fmt.Errorf("topic %q already exists", name)
+		}
+		return b.proposeCreate(name)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.catalog[name]; ok {
@@ -134,6 +281,18 @@ func (b *Broker) CreateTopic(name string, partitions int32) error {
 // EnsureTopic registers the topic if absent (used for auto-create), returning its
 // partition count.
 func (b *Broker) EnsureTopic(name string) (int32, error) {
+	if b.ctrl != nil {
+		if n, ok := b.ctrl.FSM().Partitions(name); ok {
+			return n, nil
+		}
+		if err := b.proposeCreate(name); err != nil {
+			return 0, err
+		}
+		if n, ok := b.ctrl.FSM().Partitions(name); ok {
+			return n, nil
+		}
+		return b.cfg.NumPartitions, nil
+	}
 	b.mu.RLock()
 	n, ok := b.catalog[name]
 	b.mu.RUnlock()
@@ -160,7 +319,7 @@ func (b *Broker) LocalLog(topic string, partition int32) (*storage.Log, error) {
 	if partition < 0 || partition >= np {
 		return nil, ErrUnknownPartition
 	}
-	if !b.cluster.IsLeader(topic, partition) {
+	if !b.leads(topic, partition) {
 		return nil, ErrNotLeader
 	}
 	b.mu.RLock()
@@ -174,9 +333,14 @@ func (b *Broker) LocalLog(topic string, partition int32) (*storage.Log, error) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.catalog[topic]; !ok {
-		if err := b.registerLocked(topic, np); err != nil {
-			return nil, err
+	// In controller mode the topic is already committed in the FSM (leads() proved it),
+	// so the log just needs opening; topics are never invented locally. Without a
+	// controller, register the topic on first touch as before.
+	if b.ctrl == nil {
+		if _, ok := b.catalog[topic]; !ok {
+			if err := b.registerLocked(topic, np); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return b.openLocked(topic, partition)

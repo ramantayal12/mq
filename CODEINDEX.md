@@ -9,12 +9,13 @@ for the big picture and [docs/LLD.md](docs/LLD.md) for byte-level detail.
 |------|----------------|
 | [cmd/mqbroker/main.go](cmd/mqbroker/main.go) | Entrypoint: load config, build broker + coordinator + server, run flush/retention loops, handle SIGINT/SIGTERM. |
 | [internal/config/config.go](internal/config/config.go) | `Config` + `Load()` — flags > `MQ_*` env > defaults (incl. `NodeID`, `Brokers`). |
-| [internal/cluster/cluster.go](internal/cluster/cluster.go) | Static membership + deterministic placement: `LeaderFor(topic,p)`, `IsLeader`, `GroupCoordinator(group)`, `IsCoordinator`. mq's stand-in for KRaft/ZooKeeper. |
+| [internal/cluster/cluster.go](internal/cluster/cluster.go) | Static membership + deterministic placement: `LeaderFor(topic,p)`, `ReplicasFor(topic,p,rf)` (RF placement seed), `IsLeader`, `GroupCoordinator(group)`, `IsCoordinator`. mq's stand-in for KRaft/ZooKeeper. |
+| [internal/controller/](internal/controller/) | Raft metadata controller (Workstream D, Phases 1–2): `fsm.go` (replicated topic/partition/leader/ISR state machine + read views + apply/restore notify hook), `command.go` (flat JSON command set), `controller.go` (hashicorp/raft wiring, leader `Apply` with forward-and-retry, failover), `rpc.go` (leader-forwarding RPC, port +2). Cluster-mode only; as of Phase 2 it owns placement on the client path (topic creation + Metadata). |
 | [internal/kbytes/](internal/kbytes/) | Wire primitives. `reader.go` / `writer.go`: int/string/bytes/array (fixed, non-compact). The only place (de)serialization happens. |
 | [internal/protocol/](internal/protocol/) | Kafka request/response structs + per-version encode/decode. One file per API group. |
 | [internal/record/batch.go](internal/record/batch.go) | RecordBatch v2 header parse/patch + CRC32-C; `Iterate` over concatenated batches. |
 | [internal/storage/](internal/storage/) | Segmented append-only log per partition. `log.go` (Append/Read/recovery/retention/flush), `segment.go` (.log+.index files), `index.go` (sparse index + binary search). |
-| [internal/broker/broker.go](internal/broker/broker.go) | Topic catalog + storage logs for **led** partitions only (`LocalLog` returns `ErrNotLeader` otherwise); flush-all + retention sweep. |
+| [internal/broker/broker.go](internal/broker/broker.go) | Topic catalog + storage logs. Without a controller, logs only for **led** partitions (`LocalLog` returns `ErrNotLeader` otherwise). With a controller (`SetController`), placement/catalog come from the FSM, topic creation is proposed through it, and `reconcileFromFSM` opens a log for every **replicated** partition (leader or follower). Flush-all + retention sweep. |
 | [internal/group/](internal/group/) | `coordinator.go` (join/sync/heartbeat/leave state machine + reaper), `offsets.go` (persisted committed-offset store). |
 | [internal/server/](internal/server/) | `server.go` (TCP accept + frame loop), `handlers.go` (the glue: decode → broker/storage/group → encode), `integration_test.go` (franz-go, `-tags integration`). |
 

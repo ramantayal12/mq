@@ -113,6 +113,27 @@ func (c *Cluster) IsLeader(topic string, partition int32) bool {
 	return c.LeaderFor(topic, partition) == c.self
 }
 
+// ReplicasFor returns the rf replica node ids for (topic, partition): the same hash
+// that picks the leader, then the next rf-1 brokers in node-id order, wrapping around.
+// rf is clamped to [1, len(brokers)]. The first element equals LeaderFor, so RF=1
+// reproduces the single-replica placement exactly. This is the *initial* placement
+// seed the controller records in its FSM; once recorded, the FSM is authoritative.
+func (c *Cluster) ReplicasFor(topic string, partition, rf int32) []int32 {
+	n := int32(len(c.brokers))
+	if rf < 1 {
+		rf = 1
+	}
+	if rf > n {
+		rf = n
+	}
+	start := (hash32(topic) + uint32(partition)) % uint32(n)
+	out := make([]int32, 0, rf)
+	for i := int32(0); i < rf; i++ {
+		out = append(out, c.brokers[(start+uint32(i))%uint32(n)].NodeID)
+	}
+	return out
+}
+
 // GroupCoordinator returns the node id that coordinates the given consumer group.
 // Kafka hashes the group id to an internal __consumer_offsets partition and uses
 // that partition's leader; mq collapses that to a direct hash → broker, giving the

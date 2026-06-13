@@ -24,6 +24,8 @@ type Config struct {
 	RetentionMs        int64  // segment age retention (0 = disabled)
 	RetentionBytes     int64  // total-size retention (0 = disabled)
 	AutoCreateTopics   bool   // create unknown topics on Metadata/Produce
+	RaftBootstrap      bool   // this broker bootstraps the Raft metadata controller quorum
+	ReplicationFactor  int32  // replicas per partition in cluster mode (clamped to quorum size)
 }
 
 // Default returns the built-in defaults.
@@ -42,6 +44,7 @@ func Default() Config {
 		RetentionMs:        7 * 24 * 60 * 60 * 1000,
 		RetentionBytes:     0,
 		AutoCreateTopics:   true,
+		ReplicationFactor:  1,
 	}
 }
 
@@ -70,12 +73,16 @@ func Load(args []string) Config {
 	}
 	c.NodeID = envInt32("MQ_NODE_ID", c.NodeID)
 	c.NumPartitions = envInt32("MQ_NUM_PARTITIONS", c.NumPartitions)
+	c.ReplicationFactor = envInt32("MQ_REPLICATION_FACTOR", c.ReplicationFactor)
 	c.SegmentBytes = envInt32("MQ_SEGMENT_BYTES", c.SegmentBytes)
 	c.FlushMs = int(envInt32("MQ_FLUSH_MS", int32(c.FlushMs)))
 	c.RetentionMs = envInt64("MQ_RETENTION_MS", c.RetentionMs)
 	c.RetentionBytes = envInt64("MQ_RETENTION_BYTES", c.RetentionBytes)
 	if v := os.Getenv("MQ_AUTO_CREATE_TOPICS"); v != "" {
 		c.AutoCreateTopics = v == "true" || v == "1"
+	}
+	if v := os.Getenv("MQ_RAFT_BOOTSTRAP"); v != "" {
+		c.RaftBootstrap = v == "true" || v == "1"
 	}
 
 	// Flags override everything.
@@ -87,9 +94,11 @@ func Load(args []string) Config {
 	advPort := fs.Int("advertised-port", int(c.AdvertisedPort), "advertised port")
 	logDirs := fs.String("log-dirs", c.LogDirs, "data directory")
 	numParts := fs.Int("partitions", int(c.NumPartitions), "default partitions per topic")
+	replFactor := fs.Int("replication-factor", int(c.ReplicationFactor), "replicas per partition in cluster mode (clamped to quorum size)")
 	segBytes := fs.Int("segment-bytes", int(c.SegmentBytes), "segment roll size")
 	flushMs := fs.Int("flush-ms", c.FlushMs, "flush interval ms")
 	autoCreate := fs.Bool("auto-create-topics", c.AutoCreateTopics, "auto-create unknown topics")
+	raftBootstrap := fs.Bool("raft-bootstrap", c.RaftBootstrap, "bootstrap the Raft metadata controller quorum (one broker only)")
 	_ = fs.Parse(args)
 
 	c.NodeID = int32(*nodeID)
@@ -99,9 +108,11 @@ func Load(args []string) Config {
 	c.AdvertisedPort = int32(*advPort)
 	c.LogDirs = *logDirs
 	c.NumPartitions = int32(*numParts)
+	c.ReplicationFactor = int32(*replFactor)
 	c.SegmentBytes = int32(*segBytes)
 	c.FlushMs = *flushMs
 	c.AutoCreateTopics = *autoCreate
+	c.RaftBootstrap = *raftBootstrap
 	return c
 }
 

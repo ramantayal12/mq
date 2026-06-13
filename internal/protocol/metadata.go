@@ -32,11 +32,12 @@ type MetadataBroker struct {
 
 // MetadataPartition describes one partition's placement.
 type MetadataPartition struct {
-	ErrorCode int16
-	Index     int32
-	Leader    int32
-	Replicas  []int32
-	Isr       []int32
+	ErrorCode   int16
+	Index       int32
+	Leader      int32
+	LeaderEpoch int32
+	Replicas    []int32
+	Isr         []int32
 }
 
 // MetadataTopic describes a topic and its partitions.
@@ -89,7 +90,7 @@ func (resp *MetadataResponse) Encode(w *kbytes.Writer, version int16) {
 			w.Int32(p.Index)
 			w.Int32(p.Leader)
 			if version >= 7 {
-				w.Int32(0) // leader_epoch
+				w.Int32(p.LeaderEpoch)
 			}
 			w.ArrayLen(len(p.Replicas))
 			for _, r := range p.Replicas {

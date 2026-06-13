@@ -167,6 +167,17 @@ controller, a new one is elected and serves identical Metadata.
 Dependencies (added to `go.mod`): `github.com/hashicorp/raft`,
 `github.com/hashicorp/raft-boltdb/v2`.
 
+> **Status — core landed.** `internal/controller` ships `command.go`, `fsm.go`, and
+> `controller.go` (raft wiring, bootstrap/rejoin, leader-local `Apply`, `Close`); config
+> gains `MQ_RAFT_BOOTSTRAP` and `cmd/mqbroker` stands the controller up in cluster mode
+> (raft transport on advertised-port +1). Verified by `TestFSM*` (apply/epoch/snapshot)
+> and the integration test `TestControllerFailover` (3-node quorum → commit replicates to
+> all → leader killed → survivor takes over with metadata intact).
+> **Deferred to Phase 2:** the leader-forwarding RPC and per-second liveness (`rpc.go`,
+> §1d / controller port +2). They have no consumer until the first FSM mutations flow
+> through raft, so `Apply` on a follower currently returns a clear "not leader" error
+> rather than forwarding. Phase 1 changes no client-visible behavior, as designed (1e).
+
 #### 1a. Package layout
 
 - `internal/controller/controller.go` — wraps `*raft.Raft`, owns the `*FSM`, exposes
@@ -267,6 +278,23 @@ log; only the resulting leadership change is committed.
 **Goal:** partitions have RF replicas assigned by the controller; each broker opens
 logs for partitions it replicates. **Verify:** RF=3 across 3 brokers, the same
 partition's `.log` exists on all three.
+
+> **Status — landed.** `config` gains `ReplicationFactor` (`MQ_REPLICATION_FACTOR`,
+> clamped to quorum size); `cluster.ReplicasFor(topic,p,rf)` is the placement seed (RF=1
+> reproduces the old single-replica `LeaderFor` exactly). When a controller is wired in
+> (`Broker.SetController`), the FSM is authoritative: topic creation is proposed through
+> the controller — pulling in the **deferred leader-forwarding RPC** (`controller/rpc.go`,
+> port +2), now implemented with transient-failure retry — and each broker reconciles its
+> logs against the committed placement on every FSM apply/restore, opening a log for every
+> partition it replicates (leader or follower). `metadata` sources Leader/Replicas/Isr/
+> leader-epoch from the FSM via `Broker.PartitionMeta`. The activation switch is **"a
+> controller is present"**, not cluster size, so the controller-free static-membership
+> cluster path (and single-node) is byte-for-byte unchanged. Verified by
+> `TestForwardFromFollower` (controller) and `TestReplicationPlacementRF3` (server: RF=3
+> over 3 brokers → every partition's log dir present on all three + clean produce/consume).
+> **Still deferred to Phase 5:** per-second liveness heartbeats — they exist only to drive
+> failover detection, which is Phase 5, so Phase 2 ships forwarding without them. Follower
+> logs are present but unwritten until Phase 3's fetcher fills them.
 
 - [config](../internal/config/config.go): `ReplicationFactor` (`MQ_REPLICATION_FACTOR`,
   clamped to quorum size).

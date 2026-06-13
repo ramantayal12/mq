@@ -225,8 +225,15 @@ func (c *Coordinator) Join(args JoinArgs) JoinResult {
 		m.sessionTimeout = 30 * time.Second
 	}
 
-	// A membership change (or first member) opens a new generation.
-	if isNew || g.state == stateEmpty {
+	// Any JoinGroup opens a rebalance, matching Kafka: a new member, the first member,
+	// or a rejoin by an existing member of a Stable group all start a new generation.
+	// The last case is essential for franz-go's cooperative-sticky assignor, which
+	// revokes a moved partition in one generation and re-sends JoinGroup to have it
+	// reassigned in the next; ignoring that rejoin orphans the revoked partition. A
+	// rejoin while a rebalance is already in progress (stateAwaitingSync) just joins the
+	// current round, so it does not bump again — that bounds the churn to one generation
+	// per rebalance.
+	if isNew || g.state != stateAwaitingSync {
 		g.generation++
 		g.state = stateAwaitingSync
 		for _, mm := range g.members {

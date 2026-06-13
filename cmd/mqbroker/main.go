@@ -3,15 +3,19 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"mq/internal/broker"
 	"mq/internal/cluster"
 	"mq/internal/config"
+	"mq/internal/controller"
 	"mq/internal/group"
 	"mq/internal/server"
 )
@@ -43,6 +47,25 @@ func main() {
 	if err != nil {
 		slog.Error("failed to listen", "addr", cfg.Listen, "err", err)
 		os.Exit(1)
+	}
+
+	// In cluster mode, stand up the Raft metadata controller and route the broker's
+	// placement through its FSM (Phase 2 — see docs/GAPS_PLAN.md). Single-broker mode
+	// keeps the original dependency-light, controller-free path.
+	var ctrl *controller.Controller
+	if cl.Size() > 1 {
+		ctrl, err = startController(cfg, cl)
+		if err != nil {
+			slog.Error("failed to start controller", "err", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := ctrl.Close(); err != nil {
+				slog.Warn("controller close failed", "err", err)
+			}
+		}()
+		ctrl.WaitForLeader(10 * time.Second)
+		b.SetController(ctrl)
 	}
 
 	slog.Info("mq broker started",
@@ -82,6 +105,36 @@ func main() {
 	if err := b.Close(); err != nil {
 		slog.Warn("close failed", "err", err)
 	}
+}
+
+// startController builds the Raft metadata controller for a multi-broker cluster. The
+// raft transport binds on the Kafka listen host at advertised-port+1 and advertises
+// AdvertisedHost:advertised-port+1; each peer's raft address is its Kafka host at
+// port+1. Only the broker started with --raft-bootstrap forms the initial quorum.
+func startController(cfg config.Config, cl *cluster.Cluster) (*controller.Controller, error) {
+	listenHost, _, err := net.SplitHostPort(cfg.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("parse listen address %q: %w", cfg.Listen, err)
+	}
+	raftPort := cfg.AdvertisedPort + 1
+	rpcPort := cfg.AdvertisedPort + 2
+	peers := make([]controller.Peer, 0, cl.Size())
+	for _, bi := range cl.Brokers() {
+		peers = append(peers, controller.Peer{
+			NodeID:   bi.NodeID,
+			RaftAddr: fmt.Sprintf("%s:%d", bi.Host, bi.Port+1),
+			RPCAddr:  fmt.Sprintf("%s:%d", bi.Host, bi.Port+2),
+		})
+	}
+	return controller.New(controller.Config{
+		NodeID:    cfg.NodeID,
+		RaftBind:  fmt.Sprintf("%s:%d", listenHost, raftPort),
+		Advertise: fmt.Sprintf("%s:%d", cfg.AdvertisedHost, raftPort),
+		RPCBind:   fmt.Sprintf("%s:%d", listenHost, rpcPort),
+		RaftDir:   filepath.Join(cfg.LogDirs, "raft"),
+		Bootstrap: cfg.RaftBootstrap,
+		Peers:     peers,
+	}, controller.NewFSM())
 }
 
 func retentionLoop(ctx context.Context, b *broker.Broker) {
