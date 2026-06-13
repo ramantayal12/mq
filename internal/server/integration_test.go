@@ -290,7 +290,8 @@ func TestListOffsetsByTimestamp(t *testing.T) {
 	defer cancel()
 
 	base := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
-	cl := newClient(t, addr, kgo.DefaultProduceTopic("ts"))
+	cl := newClient(t, addr, kgo.DefaultProduceTopic("ts"),
+		kgo.RecordPartitioner(kgo.ManualPartitioner()))
 	defer cl.Close()
 	// Flush per record so each lands in its own batch (timestamp seek is per-batch):
 	// offsets 0,1,2 at base+0s, base+10s, base+20s.
