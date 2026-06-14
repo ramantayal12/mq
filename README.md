@@ -83,14 +83,26 @@ Precedence: command-line flags > `MQ_*` environment variables > defaults.
 | `MQ_ADVERTISED_LISTENERS` | `--advertised-host` / `--advertised-port` | `localhost:9092` | host:port returned in Metadata (clients reconnect here) |
 | `MQ_LOG_DIRS` | `--log-dirs` | `./data` | data directory for log segments |
 | `MQ_NUM_PARTITIONS` | `--partitions` | `1` | default partitions for auto-created topics |
+| `MQ_REPLICATION_FACTOR`| `--replication-factor`| `1` | replicas per partition in cluster mode |
+| `MQ_RAFT_BOOTSTRAP` | `--raft-bootstrap` | `false` | bootstraps the Raft metadata controller quorum |
 | `MQ_SEGMENT_BYTES` | `--segment-bytes` | `67108864` | segment roll size |
 | `MQ_FLUSH_MS` | `--flush-ms` | `1000` | background fsync interval |
 | `MQ_RETENTION_MS` | — | `604800000` | segment age retention (0 = off) |
 | `MQ_RETENTION_BYTES` | — | `0` | total-size retention (0 = off) |
 | `MQ_AUTO_CREATE_TOPICS` | `--auto-create-topics` | `true` | create unknown topics on demand |
+| `MQ_METRICS_ADDR` | `--metrics-addr` | `:7080` | bind address for Prometheus metrics endpoint |
+| `MQ_STORAGE_BACKEND` | `--storage-backend` | `local` | storage backend: `local` (disk) or `object` (S3/GCS) |
+| `MQ_OBJECT_ENDPOINT` | — | `""` | S3/GCS API endpoint |
+| `MQ_OBJECT_BUCKET` | — | `mq-data` | Object storage bucket name |
+| `MQ_OBJECT_ACCESS_KEY`| — | `""` | Access key ID / HMAC access key |
+| `MQ_OBJECT_SECRET_KEY`| — | `""` | Secret key / HMAC secret key |
+| `MQ_OBJECT_REGION` | — | `us-east-1` | Cloud region |
+| `MQ_OBJECT_UPLOAD_BYTES`| — | `8388608` | Segment upload size threshold (8MB) |
+| `MQ_OBJECT_UPLOAD_MS` | — | `250` | Segment upload latency threshold (250ms) |
 
 > **`MQ_ADVERTISED_LISTENERS` matters most.** Whatever host:port the broker returns in
 > Metadata is where clients reconnect for produce/fetch — it must be reachable from the client.
+
 
 ## Testing
 
@@ -115,6 +127,8 @@ docker pull ghcr.io/ramantayal12/mq:0.1.0        # pinned version
 
 Swap the Kafka service image in your existing `docker-compose.yml`:
 
+#### Option A: Local Disk Storage Backend
+
 ```yaml
 # Before (Apache Kafka / Confluent)
 services:
@@ -127,7 +141,7 @@ services:
       KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
       KAFKA_NUM_PARTITIONS: "3"
 
-# After (mq — drop-in replacement, no ZooKeeper needed)
+# After (mq — drop-in replacement, no ZooKeeper/KRaft controller needed)
 services:
   kafka:
     image: ghcr.io/ramantayal12/mq:latest
@@ -142,7 +156,36 @@ services:
       - mq-data:/var/lib/mq
 ```
 
-> Remove the ZooKeeper service entirely — `mq` does not need it.
+#### Option B: Tiered Storage (Object-Backed) Backend
+
+To run `mq` with the AutoMQ-style **tiered storage backend** (S3/GCS or MinIO compatible), configure the object store credentials and endpoint:
+
+```yaml
+services:
+  kafka:
+    image: ghcr.io/ramantayal12/mq:latest
+    ports:
+      - "9092:9092"
+    environment:
+      MQ_LISTENERS: "0.0.0.0:9092"
+      MQ_ADVERTISED_LISTENERS: "localhost:9092"
+      MQ_NUM_PARTITIONS: "3"
+      MQ_AUTO_CREATE_TOPICS: "true"
+      # Tiered Object Storage config
+      MQ_STORAGE_BACKEND: "object"
+      MQ_OBJECT_ENDPOINT: "https://storage.googleapis.com" # Or S3 endpoint
+      MQ_OBJECT_BUCKET: "my-gcs-mq-bucket"
+      MQ_OBJECT_ACCESS_KEY: "GCS_HMAC_ACCESS_KEY"
+      MQ_OBJECT_SECRET_KEY: "GCS_HMAC_SECRET_KEY"
+      MQ_OBJECT_REGION: "us-east-1"
+      MQ_OBJECT_UPLOAD_BYTES: "8388608" # 8MB threshold
+      MQ_OBJECT_UPLOAD_MS: "250" # 250ms latency threshold
+    volumes:
+      - mq-wal:/var/lib/mq/wal # Local WAL directory for durability
+```
+
+> **Note:** When using either backend, you can remove the ZooKeeper service entirely — `mq` handles coordination locally or via its own embedded Raft controller without ZooKeeper.
+
 
 ### Replace in Kubernetes
 
@@ -175,6 +218,9 @@ containers:
 | `KAFKA_LOG_SEGMENT_BYTES` | `MQ_SEGMENT_BYTES` | Segment roll size in bytes |
 | `KAFKA_LOG_RETENTION_MS` | `MQ_RETENTION_MS` | Segment age retention (0 = off) |
 | `KAFKA_LOG_RETENTION_BYTES` | `MQ_RETENTION_BYTES` | Total-size retention (0 = off) |
+| — | `MQ_STORAGE_BACKEND` | `local` (default) or `object` |
+| — | `MQ_OBJECT_ENDPOINT` | Object storage connection endpoint |
+
 
 > **What works unchanged**: Any Kafka client library (franz-go, sarama, librdkafka, kafka-python,
 > confluent-kafka, etc.) connects to `mq` without code changes — just point the bootstrap server
@@ -188,6 +234,6 @@ containers:
 
 ## Scope / non-goals
 
-No replication or multi-broker clustering, no transactions / idempotent producer, no
-exactly-once, no SASL/TLS, no KRaft/ZooKeeper, no log compaction, no quotas. See
-[docs/HLD.md](docs/HLD.md) §8.
+- **In Scope**: Raft-replicated metadata controller (similar to KRaft), in-sync replica (ISR) partition replication, and tiered object storage (GCS/S3) backend.
+- **Out of Scope / Gaps**: Transactions / idempotent producer tracking (parsed but not enforced), Exactly-Once Semantics, SASL/TLS authentication, access control lists (ACLs), log compaction, and quotas.
+
