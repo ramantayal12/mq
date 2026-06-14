@@ -4,7 +4,7 @@
 // mid-flight, and proves the cluster keeps serving: previously committed data is still
 // readable and new writes succeed after the surviving nodes elect new partition leaders.
 //
-// These tests spawn their own cluster and ignore MQ_FUNC_ADDR.
+// These tests spawn their own cluster and ignore KAFKA_FUNC_ADDR.
 package failover
 
 import (

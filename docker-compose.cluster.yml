@@ -1,48 +1,54 @@
-# A 3-broker mq cluster. Run with:
+# A 3-broker kafka cluster. Run with:
 #   docker compose -f docker-compose.cluster.yml up --build
 # Then point any Kafka client at localhost:9092 (it discovers all three brokers).
 #
-# Every broker shares the same MQ_BROKERS membership; each has a unique MQ_NODE_ID and
+# Every broker shares the same KAFKA_BROKERS membership; each has a unique KAFKA_NODE_ID and
 # advertises a host:port reachable from the client (here, localhost:909x via port maps).
 x-broker: &broker
   build: .
-  image: mq:latest
+  image: kafka:latest
+  healthcheck:
+    test: ["CMD", "/mqbroker", "healthcheck"]
+    interval: 10s
+    timeout: 3s
+    start_period: 10s
+    retries: 3
   environment: &broker-env
-    MQ_BROKERS: "0@localhost:9092,1@localhost:9093,2@localhost:9094"
-    MQ_LISTENERS: "0.0.0.0:9092"
-    MQ_LOG_DIRS: "/var/lib/mq"
-    MQ_NUM_PARTITIONS: "6"
-    MQ_AUTO_CREATE_TOPICS: "true"
+    KAFKA_BROKERS: "0@localhost:9092,1@localhost:9093,2@localhost:9094"
+    KAFKA_LISTENERS: "0.0.0.0:9092"
+    KAFKA_LOG_DIRS: "/var/lib/kafka"
+    KAFKA_NUM_PARTITIONS: "6"
+    KAFKA_AUTO_CREATE_TOPICS: "true"
 
 services:
-  mq0:
+  kafka0:
     <<: *broker
     ports: ["9092:9092"]
     environment:
       <<: *broker-env
-      MQ_NODE_ID: "0"
-      MQ_ADVERTISED_LISTENERS: "localhost:9092"
-    volumes: ["mq0-data:/var/lib/mq"]
+      KAFKA_NODE_ID: "0"
+      KAFKA_ADVERTISED_LISTENERS: "localhost:9092"
+    volumes: ["kafka0-data:/var/lib/kafka"]
 
-  mq1:
+  kafka1:
     <<: *broker
     ports: ["9093:9092"]
     environment:
       <<: *broker-env
-      MQ_NODE_ID: "1"
-      MQ_ADVERTISED_LISTENERS: "localhost:9093"
-    volumes: ["mq1-data:/var/lib/mq"]
+      KAFKA_NODE_ID: "1"
+      KAFKA_ADVERTISED_LISTENERS: "localhost:9093"
+    volumes: ["kafka1-data:/var/lib/kafka"]
 
-  mq2:
+  kafka2:
     <<: *broker
     ports: ["9094:9092"]
     environment:
       <<: *broker-env
-      MQ_NODE_ID: "2"
-      MQ_ADVERTISED_LISTENERS: "localhost:9094"
-    volumes: ["mq2-data:/var/lib/mq"]
+      KAFKA_NODE_ID: "2"
+      KAFKA_ADVERTISED_LISTENERS: "localhost:9094"
+    volumes: ["kafka2-data:/var/lib/kafka"]
 
 volumes:
-  mq0-data:
-  mq1-data:
-  mq2-data:
+  kafka0-data:
+  kafka1-data:
+  kafka2-data:

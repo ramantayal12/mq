@@ -41,6 +41,56 @@ kafka-console-producer.sh --bootstrap-server localhost:9092 --topic demo
 kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic demo --from-beginning --group g1
 ```
 
+### Connect a client that runs in Docker
+
+When your client runs in its own container (not on the host), the broker and client must share
+a Docker network, and `KAFKA_ADVERTISED_LISTENERS` must be the broker's **service name** — not
+`localhost`. A client connects to the bootstrap address, then the broker returns its advertised
+address in Metadata and the client reconnects there. If that's `localhost`, the client reconnects
+to *its own* container and fails. Point it at the service name (`kafka`) so it resolves over the
+shared network.
+
+Add your client to the broker's compose network. The official Kafka image's console tools work
+unmodified:
+
+```yaml
+# docker-compose.yml — broker advertises its service name to other containers
+services:
+  kafka:
+    image: ghcr.io/ramantayal12/mq:latest
+    environment:
+      KAFKA_LISTENERS: "0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "kafka:9092"   # service name, reachable on kafka-net
+      KAFKA_AUTO_CREATE_TOPICS: "true"
+    networks: [kafka-net]
+
+  # Any Kafka client image. Here, the console tools shipped with Apache Kafka.
+  client:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy        # waits for the in-binary healthcheck
+    networks: [kafka-net]
+    entrypoint: ["sleep", "infinity"]
+
+networks:
+  kafka-net:
+```
+
+```bash
+docker compose up -d
+# produce/consume from inside the client container, addressing the broker by service name:
+docker compose exec client /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka:9092 --topic demo
+docker compose exec client /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9092 --topic demo --from-beginning --group g1
+```
+
+> mq advertises a **single** address, so pick the one your clients use. If you advertise
+> `kafka:9092` (for in-container clients) but also want to reach the broker from the host, map
+> the port and add `127.0.0.1 kafka` to the host's `/etc/hosts` so `kafka:9092` resolves there
+> too — mq has no dual-listener support.
+
 ## Observability (Metrics & Dashboards)
 
 `mq` is instrumented with Prometheus metrics covering requests, latency, offsets, and consumer group lag.
@@ -49,6 +99,20 @@ When running with `docker compose up --build`, a full observability stack is lau
 - **Prometheus** scrapes the broker every 5s (accessible at `http://localhost:9095`).
 - **Grafana** provides pre-built dashboards (accessible at `http://localhost:3005`, login as `admin`/`admin` or view anonymously).
 - The raw metrics endpoint is available on the broker at `http://localhost:7080/metrics`.
+
+### Health check
+
+The broker binary ships a Kafka ApiVersions probe used as the container `HEALTHCHECK`
+(the distroless image has no shell/curl). It performs the same handshake every Kafka client
+does first and exits non-zero if the broker isn't serving:
+
+```bash
+mqbroker healthcheck            # probes 127.0.0.1:9092 by default
+mqbroker healthcheck host:9092  # probe a specific address
+```
+
+`docker compose up` reports the broker as `healthy` once the probe succeeds
+(`docker compose ps`).
 
 ## Running a cluster (horizontal scaling)
 
@@ -67,40 +131,40 @@ go run ./cmd/mqbroker --node-id 2 --brokers "0@localhost:9092,1@localhost:9093,2
 A multi-container example is in [docker-compose.cluster.yml](docker-compose.cluster.yml)
 (`docker compose -f docker-compose.cluster.yml up --build`).
 
-> In cluster mode all topics use the shared `MQ_NUM_PARTITIONS` (custom per-topic counts need a
+> In cluster mode all topics use the shared `KAFKA_NUM_PARTITIONS` (custom per-topic counts need a
 > controller, which is out of scope), and there is no replication — a down broker's partitions
 > are unavailable until it returns. See [docs/HLD.md](docs/HLD.md) §9.
 
 ## Configuration
 
-Precedence: command-line flags > `MQ_*` environment variables > defaults.
+Precedence: command-line flags > `KAFKA_*` environment variables > defaults.
 
 | Env var | Flag | Default | Meaning |
 |---------|------|---------|---------|
-| `MQ_NODE_ID` | `--node-id` | `0` | this broker's node id |
-| `MQ_BROKERS` | `--brokers` | `""` | static cluster membership `id@host:port,…` (empty = single broker) |
-| `MQ_LISTENERS` | `--listen` | `0.0.0.0:9092` | bind address |
-| `MQ_ADVERTISED_LISTENERS` | `--advertised-host` / `--advertised-port` | `localhost:9092` | host:port returned in Metadata (clients reconnect here) |
-| `MQ_LOG_DIRS` | `--log-dirs` | `./data` | data directory for log segments |
-| `MQ_NUM_PARTITIONS` | `--partitions` | `1` | default partitions for auto-created topics |
-| `MQ_REPLICATION_FACTOR`| `--replication-factor`| `1` | replicas per partition in cluster mode |
-| `MQ_RAFT_BOOTSTRAP` | `--raft-bootstrap` | `false` | bootstraps the Raft metadata controller quorum |
-| `MQ_SEGMENT_BYTES` | `--segment-bytes` | `67108864` | segment roll size |
-| `MQ_FLUSH_MS` | `--flush-ms` | `1000` | background fsync interval |
-| `MQ_RETENTION_MS` | — | `604800000` | segment age retention (0 = off) |
-| `MQ_RETENTION_BYTES` | — | `0` | total-size retention (0 = off) |
-| `MQ_AUTO_CREATE_TOPICS` | `--auto-create-topics` | `true` | create unknown topics on demand |
-| `MQ_METRICS_ADDR` | `--metrics-addr` | `:7080` | bind address for Prometheus metrics endpoint |
-| `MQ_STORAGE_BACKEND` | `--storage-backend` | `local` | storage backend: `local` (disk) or `object` (S3/GCS) |
-| `MQ_OBJECT_ENDPOINT` | — | `""` | S3/GCS API endpoint |
-| `MQ_OBJECT_BUCKET` | — | `mq-data` | Object storage bucket name |
-| `MQ_OBJECT_ACCESS_KEY`| — | `""` | Access key ID / HMAC access key |
-| `MQ_OBJECT_SECRET_KEY`| — | `""` | Secret key / HMAC secret key |
-| `MQ_OBJECT_REGION` | — | `us-east-1` | Cloud region |
-| `MQ_OBJECT_UPLOAD_BYTES`| — | `8388608` | Segment upload size threshold (8MB) |
-| `MQ_OBJECT_UPLOAD_MS` | — | `250` | Segment upload latency threshold (250ms) |
+| `KAFKA_NODE_ID` | `--node-id` | `0` | this broker's node id |
+| `KAFKA_BROKERS` | `--brokers` | `""` | static cluster membership `id@host:port,…` (empty = single broker) |
+| `KAFKA_LISTENERS` | `--listen` | `0.0.0.0:9092` | bind address |
+| `KAFKA_ADVERTISED_LISTENERS` | `--advertised-host` / `--advertised-port` | `localhost:9092` | host:port returned in Metadata (clients reconnect here) |
+| `KAFKA_LOG_DIRS` | `--log-dirs` | `./data` | data directory for log segments |
+| `KAFKA_NUM_PARTITIONS` | `--partitions` | `1` | default partitions for auto-created topics |
+| `KAFKA_REPLICATION_FACTOR`| `--replication-factor`| `1` | replicas per partition in cluster mode |
+| `KAFKA_RAFT_BOOTSTRAP` | `--raft-bootstrap` | `false` | bootstraps the Raft metadata controller quorum |
+| `KAFKA_SEGMENT_BYTES` | `--segment-bytes` | `67108864` | segment roll size |
+| `KAFKA_FLUSH_MS` | `--flush-ms` | `1000` | background fsync interval |
+| `KAFKA_RETENTION_MS` | — | `604800000` | segment age retention (0 = off) |
+| `KAFKA_RETENTION_BYTES` | — | `0` | total-size retention (0 = off) |
+| `KAFKA_AUTO_CREATE_TOPICS` | `--auto-create-topics` | `true` | create unknown topics on demand |
+| `KAFKA_METRICS_ADDR` | `--metrics-addr` | `:7080` | bind address for Prometheus metrics endpoint |
+| `KAFKA_STORAGE_BACKEND` | `--storage-backend` | `local` | storage backend: `local` (disk) or `object` (S3/GCS) |
+| `KAFKA_OBJECT_ENDPOINT` | — | `""` | S3/GCS API endpoint |
+| `KAFKA_OBJECT_BUCKET` | — | `kafka-data` | Object storage bucket name |
+| `KAFKA_OBJECT_ACCESS_KEY`| — | `""` | Access key ID / HMAC access key |
+| `KAFKA_OBJECT_SECRET_KEY`| — | `""` | Secret key / HMAC secret key |
+| `KAFKA_OBJECT_REGION` | — | `us-east-1` | Cloud region |
+| `KAFKA_OBJECT_UPLOAD_BYTES`| — | `8388608` | Segment upload size threshold (8MB) |
+| `KAFKA_OBJECT_UPLOAD_MS` | — | `250` | Segment upload latency threshold (250ms) |
 
-> **`MQ_ADVERTISED_LISTENERS` matters most.** Whatever host:port the broker returns in
+> **`KAFKA_ADVERTISED_LISTENERS` matters most.** Whatever host:port the broker returns in
 > Metadata is where clients reconnect for produce/fetch — it must be reachable from the client.
 
 
@@ -148,12 +212,12 @@ services:
     ports:
       - "9092:9092"
     environment:
-      MQ_LISTENERS: "0.0.0.0:9092"
-      MQ_ADVERTISED_LISTENERS: "localhost:9092"
-      MQ_NUM_PARTITIONS: "3"
-      MQ_AUTO_CREATE_TOPICS: "true"
+      KAFKA_LISTENERS: "0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "localhost:9092"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_AUTO_CREATE_TOPICS: "true"
     volumes:
-      - mq-data:/var/lib/mq
+      - kafka-data:/var/lib/kafka
 ```
 
 #### Option B: Tiered Storage (Object-Backed) Backend
@@ -167,21 +231,21 @@ services:
     ports:
       - "9092:9092"
     environment:
-      MQ_LISTENERS: "0.0.0.0:9092"
-      MQ_ADVERTISED_LISTENERS: "localhost:9092"
-      MQ_NUM_PARTITIONS: "3"
-      MQ_AUTO_CREATE_TOPICS: "true"
+      KAFKA_LISTENERS: "0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "localhost:9092"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_AUTO_CREATE_TOPICS: "true"
       # Tiered Object Storage config
-      MQ_STORAGE_BACKEND: "object"
-      MQ_OBJECT_ENDPOINT: "https://storage.googleapis.com" # Or S3 endpoint
-      MQ_OBJECT_BUCKET: "my-gcs-mq-bucket"
-      MQ_OBJECT_ACCESS_KEY: "GCS_HMAC_ACCESS_KEY"
-      MQ_OBJECT_SECRET_KEY: "GCS_HMAC_SECRET_KEY"
-      MQ_OBJECT_REGION: "us-east-1"
-      MQ_OBJECT_UPLOAD_BYTES: "8388608" # 8MB threshold
-      MQ_OBJECT_UPLOAD_MS: "250" # 250ms latency threshold
+      KAFKA_STORAGE_BACKEND: "object"
+      KAFKA_OBJECT_ENDPOINT: "https://storage.googleapis.com" # Or S3 endpoint
+      KAFKA_OBJECT_BUCKET: "my-gcs-mq-bucket"
+      KAFKA_OBJECT_ACCESS_KEY: "GCS_HMAC_ACCESS_KEY"
+      KAFKA_OBJECT_SECRET_KEY: "GCS_HMAC_SECRET_KEY"
+      KAFKA_OBJECT_REGION: "us-east-1"
+      KAFKA_OBJECT_UPLOAD_BYTES: "8388608" # 8MB threshold
+      KAFKA_OBJECT_UPLOAD_MS: "250" # 250ms latency threshold
     volumes:
-      - mq-wal:/var/lib/mq/wal # Local WAL directory for durability
+      - kafka-wal:/var/lib/kafka/wal # Local WAL directory for durability
 ```
 
 > **Note:** When using either backend, you can remove the ZooKeeper service entirely — `mq` handles coordination locally or via its own embedded Raft controller without ZooKeeper.
@@ -198,28 +262,32 @@ containers:
     ports:
       - containerPort: 9092
     env:
-      - name: MQ_LISTENERS
+      - name: KAFKA_LISTENERS
         value: "0.0.0.0:9092"
-      - name: MQ_ADVERTISED_LISTENERS
+      - name: KAFKA_ADVERTISED_LISTENERS
         value: "$(POD_IP):9092"
-      - name: MQ_NUM_PARTITIONS
+      - name: KAFKA_NUM_PARTITIONS
         value: "3"
 ```
 
 ### Environment variable mapping (Kafka → mq)
 
-| Kafka config | mq equivalent | Notes |
+`mq` uses Kafka-style `KAFKA_*` env var names, so most config carries over verbatim. The
+table below lists the few names that differ from Apache Kafka/Confluent and the value-format
+caveats.
+
+| Kafka config | mq env var | Notes |
 |---|---|---|
-| `KAFKA_LISTENERS` | `MQ_LISTENERS` | Bind address, omit the `PLAINTEXT://` prefix |
-| `KAFKA_ADVERTISED_LISTENERS` | `MQ_ADVERTISED_LISTENERS` | Host:port clients reconnect to |
-| `KAFKA_LOG_DIRS` | `MQ_LOG_DIRS` | Data directory (default `/var/lib/mq`) |
-| `KAFKA_NUM_PARTITIONS` | `MQ_NUM_PARTITIONS` | Default partitions for auto-created topics |
-| `KAFKA_AUTO_CREATE_TOPICS_ENABLE` | `MQ_AUTO_CREATE_TOPICS` | `true` / `false` |
-| `KAFKA_LOG_SEGMENT_BYTES` | `MQ_SEGMENT_BYTES` | Segment roll size in bytes |
-| `KAFKA_LOG_RETENTION_MS` | `MQ_RETENTION_MS` | Segment age retention (0 = off) |
-| `KAFKA_LOG_RETENTION_BYTES` | `MQ_RETENTION_BYTES` | Total-size retention (0 = off) |
-| — | `MQ_STORAGE_BACKEND` | `local` (default) or `object` |
-| — | `MQ_OBJECT_ENDPOINT` | Object storage connection endpoint |
+| `KAFKA_LISTENERS` | `KAFKA_LISTENERS` | Same name; omit the `PLAINTEXT://` prefix in the value |
+| `KAFKA_ADVERTISED_LISTENERS` | `KAFKA_ADVERTISED_LISTENERS` | Same name; host:port clients reconnect to (no `PLAINTEXT://`) |
+| `KAFKA_LOG_DIRS` | `KAFKA_LOG_DIRS` | Same name; data directory (default `/var/lib/kafka`) |
+| `KAFKA_NUM_PARTITIONS` | `KAFKA_NUM_PARTITIONS` | Same name; default partitions for auto-created topics |
+| `KAFKA_AUTO_CREATE_TOPICS_ENABLE` | `KAFKA_AUTO_CREATE_TOPICS` | Drops the `_ENABLE` suffix; `true` / `false` |
+| `KAFKA_LOG_SEGMENT_BYTES` | `KAFKA_SEGMENT_BYTES` | Drops the `LOG_` prefix; segment roll size in bytes |
+| `KAFKA_LOG_RETENTION_MS` | `KAFKA_RETENTION_MS` | Drops the `LOG_` prefix; segment age retention (0 = off) |
+| `KAFKA_LOG_RETENTION_BYTES` | `KAFKA_RETENTION_BYTES` | Drops the `LOG_` prefix; total-size retention (0 = off) |
+| — | `KAFKA_STORAGE_BACKEND` | mq-specific; `local` (default) or `object` |
+| — | `KAFKA_OBJECT_ENDPOINT` | mq-specific; object storage connection endpoint |
 
 
 > **What works unchanged**: Any Kafka client library (franz-go, sarama, librdkafka, kafka-python,

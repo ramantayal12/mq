@@ -1,4 +1,4 @@
-// Package metrics defines and registers Prometheus metrics for the mq broker.
+// Package metrics defines and registers Prometheus metrics for the kafka broker.
 // Other packages import this and call Observe/Inc — metric definitions live here only.
 package metrics
 
@@ -12,46 +12,46 @@ import (
 // --- Counters ---
 
 var ProduceRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "mq_produce_requests_total",
+	Name: "kafka_produce_requests_total",
 	Help: "Total produce requests.",
 }, []string{"topic"})
 
 var ProduceBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "mq_produce_bytes_total",
+	Name: "kafka_produce_bytes_total",
 	Help: "Bytes written via produce.",
 }, []string{"topic"})
 
 var FetchRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "mq_fetch_requests_total",
+	Name: "kafka_fetch_requests_total",
 	Help: "Total fetch requests.",
 }, []string{"topic"})
 
 var FetchBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "mq_fetch_bytes_total",
+	Name: "kafka_fetch_bytes_total",
 	Help: "Bytes read via fetch.",
 }, []string{"topic"})
 
 var Requests = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "mq_requests_total",
+	Name: "kafka_requests_total",
 	Help: "Total requests by Kafka API key name.",
 }, []string{"api"})
 
 // --- Histograms ---
 
 var ProduceLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Name:    "mq_produce_latency_seconds",
+	Name:    "kafka_produce_latency_seconds",
 	Help:    "End-to-end produce latency.",
 	Buckets: prometheus.DefBuckets,
 }, []string{"topic"})
 
 var FetchLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Name:    "mq_fetch_latency_seconds",
+	Name:    "kafka_fetch_latency_seconds",
 	Help:    "End-to-end fetch latency.",
 	Buckets: prometheus.DefBuckets,
 }, []string{"topic"})
 
 var RequestLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Name:    "mq_request_latency_seconds",
+	Name:    "kafka_request_latency_seconds",
 	Help:    "Per-API request latency.",
 	Buckets: prometheus.DefBuckets,
 }, []string{"api"})
@@ -59,42 +59,42 @@ var RequestLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 // --- Gauges ---
 
 var ActiveConnections = prometheus.NewGauge(prometheus.GaugeOpts{
-	Name: "mq_active_connections",
+	Name: "kafka_active_connections",
 	Help: "Current open TCP connections.",
 })
 
 var TopicsTotal = prometheus.NewGauge(prometheus.GaugeOpts{
-	Name: "mq_topics_total",
+	Name: "kafka_topics_total",
 	Help: "Number of known topics.",
 })
 
 var PartitionsTotal = prometheus.NewGauge(prometheus.GaugeOpts{
-	Name: "mq_partitions_total",
+	Name: "kafka_partitions_total",
 	Help: "Total partitions across all topics.",
 })
 
 var PartitionLEO = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Name: "mq_partition_log_end_offset",
+	Name: "kafka_partition_log_end_offset",
 	Help: "Log end offset per partition.",
 }, []string{"topic", "partition"})
 
 var PartitionHWM = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Name: "mq_partition_high_watermark",
+	Name: "kafka_partition_high_watermark",
 	Help: "High watermark per partition.",
 }, []string{"topic", "partition"})
 
 var PartitionSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Name: "mq_partition_log_size_bytes",
+	Name: "kafka_partition_log_size_bytes",
 	Help: "On-disk log size per partition.",
 }, []string{"topic", "partition"})
 
 var GroupMembers = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Name: "mq_consumer_group_members",
+	Name: "kafka_consumer_group_members",
 	Help: "Members in each consumer group.",
 }, []string{"group"})
 
 var GroupLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Name: "mq_consumer_group_lag",
+	Name: "kafka_consumer_group_lag",
 	Help: "Consumer group lag (LEO minus committed offset).",
 }, []string{"group", "topic", "partition"})
 

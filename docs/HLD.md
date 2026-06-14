@@ -24,7 +24,7 @@ The goal is to demonstrate Kafka's core mechanics with the smallest faithful sur
 | # | Decision | Consequence |
 |---|----------|-------------|
 | 1 | **Real Kafka wire protocol** | Off-the-shelf clients work. Cost: must match Kafka's binary request/response framing exactly. Mitigated by decision in §3. |
-| 2 | **Single broker by default; optional static-membership cluster** | One process is the simple default. With `MQ_BROKERS` set, several brokers form a cluster with replication factor 1 (see §10) — partitions are spread across brokers and each consumer group has one coordinator broker. No replication/failover. |
+| 2 | **Single broker by default; optional static-membership cluster** | One process is the simple default. With `KAFKA_BROKERS` set, several brokers form a cluster with replication factor 1 (see §10) — partitions are spread across brokers and each consumer group has one coordinator broker. No replication/failover. |
 | 3 | **Consumer groups + committed offsets** | Full join/sync/heartbeat protocol; offsets persist so restarted consumers resume. |
 | 4 | **Async-flush segment files** | Append to OS page cache, `fsync` periodically. Fast, Kafka-default-like; small data-loss window on hard crash. |
 
@@ -132,8 +132,8 @@ replaces Kafka's **controller quorum (KRaft/ZooKeeper)** with **static membershi
 placement** ([internal/cluster](../internal/cluster)). Replication factor is 1 (one copy per
 partition; no failover).
 
-- **Membership** is configured identically on every broker: `MQ_NODE_ID` + `MQ_BROKERS`
-  (`"0@host0:9092,1@host1:9092,2@host2:9092"`). Empty `MQ_BROKERS` = single-broker mode.
+- **Membership** is configured identically on every broker: `KAFKA_NODE_ID` + `KAFKA_BROKERS`
+  (`"0@host0:9092,1@host1:9092,2@host2:9092"`). Empty `KAFKA_BROKERS` = single-broker mode.
 - **Partition placement** is a pure function — `leader(topic, p) = brokers[(hash(topic)+p) %
   N]` — so every broker computes the same assignment with zero coordination. A broker opens a
   partition's log only if it leads that partition; a produce/fetch for a partition it doesn't
@@ -143,13 +143,13 @@ partition; no failover).
   Committed offsets live on the coordinator broker's disk.
 - **Trade-off vs. Kafka:** no consensus layer means custom per-topic partition counts can't be
   agreed cluster-wide without a controller, so in cluster mode every topic uses the shared
-  `MQ_NUM_PARTITIONS`; and a dead broker's partitions are unavailable until it returns (no
+  `KAFKA_NUM_PARTITIONS`; and a dead broker's partitions are unavailable until it returns (no
   replication). Both are deliberate scope cuts, not design accidents.
 
 ## 10. Deployment
 
 Shipped as a Kafka-style Docker image: static binary, `EXPOSE 9092`, data on a
-`VOLUME`, configured by `MQ_*` env vars (notably `MQ_ADVERTISED_LISTENERS`, since the
+`VOLUME`, configured by `KAFKA_*` env vars (notably `KAFKA_ADVERTISED_LISTENERS`, since the
 host:port returned in Metadata is what clients reconnect to). See the Dockerfile and
 `docker-compose.yml`.
 

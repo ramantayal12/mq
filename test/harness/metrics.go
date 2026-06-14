@@ -36,7 +36,7 @@ func (b *Broker) scrapeOnce() (string, error) {
 }
 
 // CounterValue returns the sample value of the first line in body that starts with
-// prefix (e.g. `mq_produce_requests_total{topic="t"}`), or -1 if absent.
+// prefix (e.g. `kafka_produce_requests_total{topic="t"}`), or -1 if absent.
 func CounterValue(body, prefix string) float64 {
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(line, prefix) {

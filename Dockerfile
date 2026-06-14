@@ -17,11 +17,16 @@ FROM gcr.io/distroless/static-debian12:nonroot
 EXPOSE 9092 7080
 
 # Persist log segments across container restarts (like Kafka's /var/lib/kafka/data).
-VOLUME /var/lib/mq
-ENV MQ_LOG_DIRS=/var/lib/mq \
-    MQ_LISTENERS=0.0.0.0:9092 \
-    MQ_ADVERTISED_LISTENERS=localhost:9092 \
-    MQ_METRICS_ADDR=0.0.0.0:7080
+VOLUME /var/lib/kafka
+ENV KAFKA_LOG_DIRS=/var/lib/kafka \
+    KAFKA_LISTENERS=0.0.0.0:9092 \
+    KAFKA_ADVERTISED_LISTENERS=localhost:9092 \
+    KAFKA_METRICS_ADDR=0.0.0.0:7080
 
 COPY --from=build /mqbroker /mqbroker
+
+# In-binary Kafka ApiVersions probe (distroless has no shell/curl to script a TCP check).
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["/mqbroker", "healthcheck"]
+
 ENTRYPOINT ["/mqbroker"]

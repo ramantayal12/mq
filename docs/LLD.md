@@ -449,19 +449,19 @@ Handler responsibilities summary:
 
 ```go
 type Config struct {
-    Listeners          string   // MQ_LISTENERS,           default "0.0.0.0:9092"
-    AdvertisedHost     string   // from MQ_ADVERTISED_LISTENERS, default "localhost"
+    Listeners          string   // KAFKA_LISTENERS,           default "0.0.0.0:9092"
+    AdvertisedHost     string   // from KAFKA_ADVERTISED_LISTENERS, default "localhost"
     AdvertisedPort     int32    //                          default 9092
-    LogDirs            string   // MQ_LOG_DIRS,             default "/var/lib/mq" (or ./data dev)
-    NumPartitions      int32    // MQ_NUM_PARTITIONS,       default 1
-    SegmentBytes       int32    // MQ_SEGMENT_BYTES,        default 64<<20
+    LogDirs            string   // KAFKA_LOG_DIRS,             default "/var/lib/kafka" (or ./data dev)
+    NumPartitions      int32    // KAFKA_NUM_PARTITIONS,       default 1
+    SegmentBytes       int32    // KAFKA_SEGMENT_BYTES,        default 64<<20
     IndexIntervalBytes int32    //                          default 4096
-    FlushMs            int      // MQ_FLUSH_MS,             default 1000
-    RetentionMs        int64    // MQ_RETENTION_MS,         default 7*24h (0 = disabled)
+    FlushMs            int      // KAFKA_FLUSH_MS,             default 1000
+    RetentionMs        int64    // KAFKA_RETENTION_MS,         default 7*24h (0 = disabled)
     RetentionBytes     int64    //                          default 0 (disabled)
-    AutoCreateTopics   bool     // MQ_AUTO_CREATE_TOPICS,   default true
+    AutoCreateTopics   bool     // KAFKA_AUTO_CREATE_TOPICS,   default true
 }
-func Load() Config  // precedence: flags > env (MQ_*) > defaults
+func Load() Config  // precedence: flags > env (KAFKA_*) > defaults
 ```
 
 ---

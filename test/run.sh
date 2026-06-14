@@ -6,8 +6,8 @@
 #
 # Drive a long load run against a running docker-compose stack and watch Grafana:
 #   docker compose up --build -d
-#   MQ_FUNC_ADDR=localhost:9092 \
-#   MQ_FUNC_METRICS_URL=http://localhost:7080/metrics \
+#   KAFKA_FUNC_ADDR=localhost:9092 \
+#   KAFKA_FUNC_METRICS_URL=http://localhost:7080/metrics \
 #   LOAD_DURATION=3m \
 #     ./test/run.sh load
 set -euo pipefail

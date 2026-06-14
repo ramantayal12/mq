@@ -2,26 +2,33 @@
 # Then point any Kafka client at localhost:9092.
 # Grafana: http://localhost:3005  Prometheus: http://localhost:9095
 services:
-  mq:
+  kafka:
     build: .
-    image: mq:latest
+    image: kafka:latest
     user: "0"
     ports:
       - "9092:9092"
       - "7080:7080"
     environment:
-      MQ_LISTENERS: "0.0.0.0:9092"
+      KAFKA_LISTENERS: "0.0.0.0:9092"
       # Clients receive this host:port in Metadata and reconnect to it, so it must be
       # reachable from where the client runs (the host, here).
-      MQ_ADVERTISED_LISTENERS: "localhost:9092"
-      MQ_LOG_DIRS: "/var/lib/mq"
-      MQ_NUM_PARTITIONS: "3"
-      MQ_AUTO_CREATE_TOPICS: "true"
-      MQ_METRICS_ADDR: "0.0.0.0:7080"
+      KAFKA_ADVERTISED_LISTENERS: "localhost:9092"
+      KAFKA_LOG_DIRS: "/var/lib/kafka"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_AUTO_CREATE_TOPICS: "true"
+      KAFKA_METRICS_ADDR: "0.0.0.0:7080"
+    # In-binary Kafka ApiVersions probe (see Dockerfile HEALTHCHECK).
+    healthcheck:
+      test: ["CMD", "/mqbroker", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
     volumes:
-      - mq-data:/var/lib/mq
+      - kafka-data:/var/lib/kafka
     networks:
-      - mq-net
+      - kafka-net
 
   # Object storage for the (opt-in) object backend. Speaks the S3 API, so the same client
   # code path runs here and against GCS's S3-interop endpoint in prod.
@@ -37,7 +44,7 @@ services:
     volumes:
       - minio-data:/data
     networks:
-      - mq-net
+      - kafka-net
 
   # One-shot: wait for MinIO, then create the bucket. Exits 0 when done.
   createbuckets:
@@ -48,11 +55,11 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 minioadmin minioadmin;
       until mc ready local; do sleep 1; done;
-      mc mb -p local/mq-data;
+      mc mb -p local/kafka-data;
       exit 0
       "
     networks:
-      - mq-net
+      - kafka-net
 
   prometheus:
     image: prom/prometheus:latest
@@ -62,7 +69,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks:
-      - mq-net
+      - kafka-net
 
   grafana:
     image: grafana/grafana:latest
@@ -75,13 +82,13 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     networks:
-      - mq-net
+      - kafka-net
 
 networks:
-  mq-net:
+  kafka-net:
 
 volumes:
-  mq-data:
+  kafka-data:
   minio-data:
   prometheus-data:
   grafana-data:

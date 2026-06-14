@@ -6,7 +6,7 @@
 //	docker compose up -d minio createbuckets
 //	go test -tags=integration ./internal/storage/object/ -run Store
 //
-// Connection settings come from MQ_OBJECT_* env vars, defaulting to the compose service.
+// Connection settings come from KAFKA_OBJECT_* env vars, defaulting to the compose service.
 package object
 
 import (
@@ -24,11 +24,11 @@ func testConfig() Config {
 		return def
 	}
 	return Config{
-		Endpoint:  get("MQ_OBJECT_ENDPOINT", "http://localhost:9000"),
-		Bucket:    get("MQ_OBJECT_BUCKET", "mq-data"),
-		AccessKey: get("MQ_OBJECT_ACCESS_KEY", "minioadmin"),
-		SecretKey: get("MQ_OBJECT_SECRET_KEY", "minioadmin"),
-		Region:    get("MQ_OBJECT_REGION", "us-east-1"),
+		Endpoint:  get("KAFKA_OBJECT_ENDPOINT", "http://localhost:9000"),
+		Bucket:    get("KAFKA_OBJECT_BUCKET", "kafka-data"),
+		AccessKey: get("KAFKA_OBJECT_ACCESS_KEY", "minioadmin"),
+		SecretKey: get("KAFKA_OBJECT_SECRET_KEY", "minioadmin"),
+		Region:    get("KAFKA_OBJECT_REGION", "us-east-1"),
 	}
 }
 

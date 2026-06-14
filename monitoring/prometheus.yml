@@ -1,8 +1,8 @@
-# Prometheus configuration for mq broker metrics.
+# Prometheus configuration for kafka broker metrics.
 global:
   scrape_interval: 5s
 
 scrape_configs:
-  - job_name: mq
+  - job_name: kafka
     static_configs:
-      - targets: ["mq:7080"]
+      - targets: ["kafka:7080"]

@@ -19,7 +19,7 @@ import (
 const defaultFetchBytes int32 = 1 << 20
 
 // clusterID is reported in Metadata responses.
-var clusterID = "mq-cluster"
+var clusterID = "kafka-cluster"
 
 // Handler turns decoded requests into broker/storage/group calls and back into
 // response bodies. It is the only layer that imports protocol, broker and group

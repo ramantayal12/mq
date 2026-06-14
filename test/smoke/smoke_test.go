@@ -2,7 +2,7 @@
 
 // Package smoke holds fast correctness checks against a single real broker: the basic
 // produce/consume contract, consumer-group offset durability, and that the Prometheus
-// endpoint actually exports the mq_* series.
+// endpoint actually exports the kafka_* series.
 package smoke
 
 import (
@@ -146,7 +146,7 @@ func TestConsumerGroupCommitResume(t *testing.T) {
 }
 
 // TestMetricsExposed verifies the Prometheus integration end-to-end: after real traffic,
-// /metrics serves the expected mq_* series and the produce counter advances.
+// /metrics serves the expected kafka_* series and the produce counter advances.
 func TestMetricsExposed(t *testing.T) {
 	if broker.MetricsURL == "" {
 		t.Skip("metrics URL not configured")
@@ -170,19 +170,19 @@ func TestMetricsExposed(t *testing.T) {
 		t.Fatalf("scrape: %v", err)
 	}
 	for _, name := range []string{
-		"mq_produce_requests_total",
-		"mq_produce_bytes_total",
-		"mq_requests_total",
-		"mq_request_latency_seconds",
-		"mq_active_connections",
-		"mq_topics_total",
-		"mq_partition_log_end_offset",
+		"kafka_produce_requests_total",
+		"kafka_produce_bytes_total",
+		"kafka_requests_total",
+		"kafka_request_latency_seconds",
+		"kafka_active_connections",
+		"kafka_topics_total",
+		"kafka_partition_log_end_offset",
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("metric %q missing from /metrics output", name)
 		}
 	}
-	if v := harness.CounterValue(body, `mq_produce_requests_total{topic="`+topic+`"}`); v <= 0 {
-		t.Errorf("mq_produce_requests_total for %s = %v, want > 0", topic, v)
+	if v := harness.CounterValue(body, `kafka_produce_requests_total{topic="`+topic+`"}`); v <= 0 {
+		t.Errorf("kafka_produce_requests_total for %s = %v, want > 0", topic, v)
 	}
 }

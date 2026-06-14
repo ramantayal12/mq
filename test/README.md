@@ -16,8 +16,8 @@ it.
 | Path | Responsibility |
 |------|----------------|
 | [harness/](harness/) | Shared, reusable helpers (no `testing` dependency): `build.go` compiles the binary + allocates ports; `broker.go` spawns/targets a single node; `cluster.go` spawns a real N-node RF Raft cluster and can `Kill` a node; `load.go` generates sustained real-time load; `metrics.go` scrapes/parses `/metrics`. |
-| [smoke/](smoke/) | Fast correctness: produce/consume round-trip, consumer-group commit/resume, `/metrics` exposes the `mq_*` series. |
-| [load/](load/) | Sustained, bursty, multi-topic/multi-group load to populate dashboards; asserts traffic flowed and per-topic + `mq_consumer_group_lag` series exist. |
+| [smoke/](smoke/) | Fast correctness: produce/consume round-trip, consumer-group commit/resume, `/metrics` exposes the `kafka_*` series. |
+| [load/](load/) | Sustained, bursty, multi-topic/multi-group load to populate dashboards; asserts traffic flowed and per-topic + `kafka_consumer_group_lag` series exist. |
 | [failover/](failover/) | 3-node RF=3 cluster; kills a broker mid-flight and proves committed data stays readable and new writes still succeed after leader re-election. |
 
 ## Run
@@ -39,13 +39,13 @@ load suite against the docker-compose stack:
 
 ```bash
 docker compose up --build -d                 # broker :9092, Prometheus :9095, Grafana :3005
-MQ_FUNC_ADDR=localhost:9092 \
-MQ_FUNC_METRICS_URL=http://localhost:7080/metrics \
+KAFKA_FUNC_ADDR=localhost:9092 \
+KAFKA_FUNC_METRICS_URL=http://localhost:7080/metrics \
 LOAD_DURATION=3m \
   ./test/run.sh load
 # open http://localhost:3005  (admin / admin)
 ```
 
-`MQ_FUNC_ADDR` makes the `smoke` and `load` suites target an existing broker instead of
+`KAFKA_FUNC_ADDR` makes the `smoke` and `load` suites target an existing broker instead of
 spawning one. `LOAD_DURATION` (e.g. `2m`, `5m`) controls how long the load suite runs
 (default 20s).

@@ -2,10 +2,10 @@
 
 // Package load drives sustained, real-time-shaped traffic at a broker. Its main purpose
 // is to make the Grafana dashboards move: run it against a `docker compose up` broker
-// (MQ_FUNC_ADDR=localhost:9092) and watch http://localhost:3005 while it runs.
+// (KAFKA_FUNC_ADDR=localhost:9092) and watch http://localhost:3005 while it runs.
 //
-//	MQ_FUNC_ADDR=localhost:9092 \
-//	MQ_FUNC_METRICS_URL=http://localhost:7080/metrics \
+//	KAFKA_FUNC_ADDR=localhost:9092 \
+//	KAFKA_FUNC_METRICS_URL=http://localhost:7080/metrics \
 //	LOAD_DURATION=2m \
 //	  go test -tags functional -run TestSustainedLoad -v ./test/load/
 package load
@@ -79,11 +79,11 @@ func TestSustainedLoad(t *testing.T) {
 	// Per-topic produce counters and the consumer-group lag series (wired in metrics)
 	// must be present after a real workload.
 	for _, topic := range cfg.Topics {
-		if v := harness.CounterValue(body, fmt.Sprintf(`mq_produce_requests_total{topic="%s"}`, topic)); v <= 0 {
+		if v := harness.CounterValue(body, fmt.Sprintf(`kafka_produce_requests_total{topic="%s"}`, topic)); v <= 0 {
 			t.Errorf("no produce metric for topic %s", topic)
 		}
 	}
-	if !strings.Contains(body, "mq_consumer_group_lag") {
-		t.Error("mq_consumer_group_lag series missing after consumer-group load")
+	if !strings.Contains(body, "kafka_consumer_group_lag") {
+		t.Error("kafka_consumer_group_lag series missing after consumer-group load")
 	}
 }

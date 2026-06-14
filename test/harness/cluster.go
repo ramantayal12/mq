@@ -53,15 +53,15 @@ func StartCluster(n int, rf, partitions int) (*Cluster, error) {
 		cmd := exec.Command(bin, "--metrics-addr=")
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(),
-			fmt.Sprintf("MQ_NODE_ID=%d", i),
-			"MQ_BROKERS="+spec,
-			"MQ_LISTENERS="+addrs[i],
-			"MQ_ADVERTISED_LISTENERS="+addrs[i],
-			fmt.Sprintf("MQ_REPLICATION_FACTOR=%d", rf),
-			fmt.Sprintf("MQ_NUM_PARTITIONS=%d", partitions),
-			fmt.Sprintf("MQ_RAFT_BOOTSTRAP=%t", i == 0),
-			"MQ_AUTO_CREATE_TOPICS=true",
-			"MQ_LOG_DIRS="+filepath.Join(root, fmt.Sprintf("node-%d", i)),
+			fmt.Sprintf("KAFKA_NODE_ID=%d", i),
+			"KAFKA_BROKERS="+spec,
+			"KAFKA_LISTENERS="+addrs[i],
+			"KAFKA_ADVERTISED_LISTENERS="+addrs[i],
+			fmt.Sprintf("KAFKA_REPLICATION_FACTOR=%d", rf),
+			fmt.Sprintf("KAFKA_NUM_PARTITIONS=%d", partitions),
+			fmt.Sprintf("KAFKA_RAFT_BOOTSTRAP=%t", i == 0),
+			"KAFKA_AUTO_CREATE_TOPICS=true",
+			"KAFKA_LOG_DIRS="+filepath.Join(root, fmt.Sprintf("node-%d", i)),
 		)
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		if err := cmd.Start(); err != nil {

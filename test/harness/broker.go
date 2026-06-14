@@ -15,7 +15,7 @@ import (
 )
 
 // Broker is a running mqbroker the tests can talk to: either a process this harness
-// spawned, or an external one selected via MQ_FUNC_ADDR.
+// spawned, or an external one selected via KAFKA_FUNC_ADDR.
 type Broker struct {
 	Addr       string // Kafka bootstrap address
 	MetricsURL string // Prometheus scrape URL ("" if unknown)
@@ -24,12 +24,12 @@ type Broker struct {
 	dataDir string
 }
 
-// StartBroker returns a single-node broker. If MQ_FUNC_ADDR is set it targets that
+// StartBroker returns a single-node broker. If KAFKA_FUNC_ADDR is set it targets that
 // already-running broker (e.g. `docker compose up`); otherwise it builds and spawns one
 // on free ephemeral ports with a throwaway data dir.
 func StartBroker() (*Broker, error) {
-	if addr := os.Getenv("MQ_FUNC_ADDR"); addr != "" {
-		b := &Broker{Addr: addr, MetricsURL: os.Getenv("MQ_FUNC_METRICS_URL")}
+	if addr := os.Getenv("KAFKA_FUNC_ADDR"); addr != "" {
+		b := &Broker{Addr: addr, MetricsURL: os.Getenv("KAFKA_FUNC_METRICS_URL")}
 		if !b.waitReady(30 * time.Second) {
 			return nil, fmt.Errorf("external broker not ready at %s", addr)
 		}
@@ -51,12 +51,12 @@ func StartBroker() (*Broker, error) {
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
-		"MQ_LISTENERS="+addr,
-		"MQ_ADVERTISED_LISTENERS="+addr,
-		"MQ_METRICS_ADDR="+metrics,
-		"MQ_LOG_DIRS="+filepath.Join(dir, "data"),
-		"MQ_NUM_PARTITIONS=6",
-		"MQ_AUTO_CREATE_TOPICS=true",
+		"KAFKA_LISTENERS="+addr,
+		"KAFKA_ADVERTISED_LISTENERS="+addr,
+		"KAFKA_METRICS_ADDR="+metrics,
+		"KAFKA_LOG_DIRS="+filepath.Join(dir, "data"),
+		"KAFKA_NUM_PARTITIONS=6",
+		"KAFKA_AUTO_CREATE_TOPICS=true",
 	)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
