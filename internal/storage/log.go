@@ -288,6 +288,17 @@ func (l *Log) LatestOffset() int64 {
 	return l.nextOffset
 }
 
+// Size returns the total size in bytes of all segments in the log.
+func (l *Log) Size() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var total int64
+	for _, s := range l.segments {
+		total += int64(s.logSize)
+	}
+	return total
+}
+
 // Flush fsyncs the active segment if dirty.
 func (l *Log) Flush() error {
 	l.mu.Lock()

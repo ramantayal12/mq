@@ -26,6 +26,20 @@ type Config struct {
 	AutoCreateTopics   bool   // create unknown topics on Metadata/Produce
 	RaftBootstrap      bool   // this broker bootstraps the Raft metadata controller quorum
 	ReplicationFactor  int32  // replicas per partition in cluster mode (clamped to quorum size)
+	MetricsAddr        string // bind address for the Prometheus /metrics HTTP endpoint (empty disables)
+
+	// Storage backend selection. "local" (default) keeps the per-partition file log; "object"
+	// stores partitions in object storage (MinIO/GCS) behind the node-level object.Storage. The
+	// object backend keeps its index in the Raft FSM, so it auto-starts a controller even on a
+	// single node.
+	StorageBackend    string // "local" or "object"
+	ObjectEndpoint    string // S3/MinIO endpoint, e.g. "http://localhost:9000" or "https://storage.googleapis.com"
+	ObjectBucket      string // object bucket
+	ObjectAccessKey   string // access key id
+	ObjectSecretKey   string // secret access key
+	ObjectRegion      string // GCS interop wants one set; MinIO ignores it
+	ObjectUploadBytes int64  // flush pending to an object at this many bytes (0 = no size trigger)
+	ObjectUploadMs    int64  // ... or this many ms since the last flush (<=0 => 250ms)
 }
 
 // Default returns the built-in defaults.
@@ -45,6 +59,12 @@ func Default() Config {
 		RetentionBytes:     0,
 		AutoCreateTopics:   true,
 		ReplicationFactor:  1,
+		MetricsAddr:        ":7080",
+		StorageBackend:     "local",
+		ObjectBucket:       "mq-data",
+		ObjectRegion:       "us-east-1",
+		ObjectUploadBytes:  8 << 20,
+		ObjectUploadMs:     250,
 	}
 }
 
@@ -84,6 +104,29 @@ func Load(args []string) Config {
 	if v := os.Getenv("MQ_RAFT_BOOTSTRAP"); v != "" {
 		c.RaftBootstrap = v == "true" || v == "1"
 	}
+	if v := os.Getenv("MQ_METRICS_ADDR"); v != "" {
+		c.MetricsAddr = v
+	}
+	if v := os.Getenv("MQ_STORAGE_BACKEND"); v != "" {
+		c.StorageBackend = v
+	}
+	if v := os.Getenv("MQ_OBJECT_ENDPOINT"); v != "" {
+		c.ObjectEndpoint = v
+	}
+	if v := os.Getenv("MQ_OBJECT_BUCKET"); v != "" {
+		c.ObjectBucket = v
+	}
+	if v := os.Getenv("MQ_OBJECT_ACCESS_KEY"); v != "" {
+		c.ObjectAccessKey = v
+	}
+	if v := os.Getenv("MQ_OBJECT_SECRET_KEY"); v != "" {
+		c.ObjectSecretKey = v
+	}
+	if v := os.Getenv("MQ_OBJECT_REGION"); v != "" {
+		c.ObjectRegion = v
+	}
+	c.ObjectUploadBytes = envInt64("MQ_OBJECT_UPLOAD_BYTES", c.ObjectUploadBytes)
+	c.ObjectUploadMs = envInt64("MQ_OBJECT_UPLOAD_MS", c.ObjectUploadMs)
 
 	// Flags override everything.
 	fs := flag.NewFlagSet("mqbroker", flag.ContinueOnError)
@@ -99,6 +142,8 @@ func Load(args []string) Config {
 	flushMs := fs.Int("flush-ms", c.FlushMs, "flush interval ms")
 	autoCreate := fs.Bool("auto-create-topics", c.AutoCreateTopics, "auto-create unknown topics")
 	raftBootstrap := fs.Bool("raft-bootstrap", c.RaftBootstrap, "bootstrap the Raft metadata controller quorum (one broker only)")
+	metricsAddr := fs.String("metrics-addr", c.MetricsAddr, "bind address for Prometheus /metrics endpoint (empty disables)")
+	storageBackend := fs.String("storage-backend", c.StorageBackend, "partition storage backend: local|object (object config comes from MQ_OBJECT_* env)")
 	_ = fs.Parse(args)
 
 	c.NodeID = int32(*nodeID)
@@ -113,6 +158,8 @@ func Load(args []string) Config {
 	c.FlushMs = *flushMs
 	c.AutoCreateTopics = *autoCreate
 	c.RaftBootstrap = *raftBootstrap
+	c.MetricsAddr = *metricsAddr
+	c.StorageBackend = *storageBackend
 	return c
 }
 

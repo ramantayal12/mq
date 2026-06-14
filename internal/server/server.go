@@ -13,6 +13,7 @@ import (
 	"mq/internal/broker"
 	"mq/internal/group"
 	"mq/internal/kbytes"
+	"mq/internal/metrics"
 	"mq/internal/protocol"
 )
 
@@ -96,8 +97,10 @@ func (s *Server) track(c net.Conn, add bool) {
 	defer s.mu.Unlock()
 	if add {
 		s.conns[c] = struct{}{}
+		metrics.ActiveConnections.Inc()
 	} else {
 		delete(s.conns, c)
+		metrics.ActiveConnections.Dec()
 	}
 }
 

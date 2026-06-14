@@ -9,7 +9,11 @@
 // routes it through the FSM, so Phase 1 changes no client-visible behavior.
 package controller
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"mq/internal/storage/object"
+)
 
 // CmdType discriminates the flat Command struct. Values start at 1 so a zero-valued
 // Command (e.g. a malformed frame) is never mistaken for a valid mutation.
@@ -21,6 +25,8 @@ const (
 	CmdChangeLeader                        // {Topic, Partition, Leader, ISR} — bumps LeaderEpoch
 	CmdChangeISR                           // {Topic, Partition, ISR}
 	CmdHeartbeat                           // {From} — liveness ping to the leader; never enters the raft log
+	CmdCommitSegment                       // {Topic, Partition, Segment} — record an uploaded object's slice (object backend)
+	CmdPruneSegments                       // {Topic, Partition, Cutoff} — drop a partition's refs fully below an offset
 )
 
 // Command is the single, flat mutation applied to the FSM. One struct (rather than a
@@ -36,6 +42,9 @@ type Command struct {
 	Leader     int32     `json:"leader,omitempty"`
 	ISR        []int32   `json:"isr,omitempty"`
 	From       int32     `json:"from,omitempty"` // CmdHeartbeat: the heartbeating node (RPC only, never applied)
+
+	Segment *object.SegmentRef `json:"seg,omitempty"`    // CmdCommitSegment: the uploaded object's slice
+	Cutoff  int64              `json:"cutoff,omitempty"` // CmdPruneSegments: drop refs with NextOffset <= Cutoff
 }
 
 func (c Command) encode() ([]byte, error) { return json.Marshal(c) }

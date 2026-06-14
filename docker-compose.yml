@@ -1,11 +1,13 @@
 # Run the broker with: docker compose up --build
 # Then point any Kafka client at localhost:9092.
+# Grafana: http://localhost:3005  Prometheus: http://localhost:9095
 services:
   mq:
     build: .
     image: mq:latest
     ports:
       - "9092:9092"
+      - "7080:7080"
     environment:
       MQ_LISTENERS: "0.0.0.0:9092"
       # Clients receive this host:port in Metadata and reconnect to it, so it must be
@@ -14,8 +16,71 @@ services:
       MQ_LOG_DIRS: "/var/lib/mq"
       MQ_NUM_PARTITIONS: "3"
       MQ_AUTO_CREATE_TOPICS: "true"
+      MQ_METRICS_ADDR: "0.0.0.0:7080"
     volumes:
       - mq-data:/var/lib/mq
+    networks:
+      - mq-net
+
+  # Object storage for the (opt-in) object backend. Speaks the S3 API, so the same client
+  # code path runs here and against GCS's S3-interop endpoint in prod.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    networks:
+      - mq-net
+
+  # One-shot: wait for MinIO, then create the bucket. Exits 0 when done.
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      until mc ready local; do sleep 1; done;
+      mc mb -p local/mq-data;
+      exit 0
+      "
+    networks:
+      - mq-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9095:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - mq-net
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3005:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - mq-net
+
+networks:
+  mq-net:
 
 volumes:
   mq-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:

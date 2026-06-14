@@ -20,6 +20,7 @@ import (
 	"mq/internal/controller"
 	"mq/internal/replication"
 	"mq/internal/storage"
+	"mq/internal/storage/object"
 )
 
 // Errors returned by LocalLog so handlers can map them to Kafka error codes.
@@ -43,14 +44,15 @@ type TopicInfo struct {
 // creation is proposed through the controller, and this node opens a log for every
 // partition it replicates (leader or follower) by reconciling against the FSM.
 type Broker struct {
-	cfg     config.Config
-	logCfg  storage.Config
-	cluster *cluster.Cluster
-	ctrl    *controller.Controller // nil unless cluster mode wires in the Raft controller
-	repl    *replication.Manager   // nil unless a controller is wired in; follower fetchers
-	mu      sync.RWMutex
-	catalog map[string]int32                  // topic -> partition count (cluster-wide)
-	logs    map[string]map[int32]*storage.Log // topic -> partition -> local log
+	cfg      config.Config
+	logCfg   storage.Config
+	cluster  *cluster.Cluster
+	ctrl     *controller.Controller // nil unless cluster mode wires in the Raft controller
+	repl     *replication.Manager   // nil unless a controller is wired in; follower fetchers
+	objStore *object.Storage        // nil for the file backend; set when StorageBackend=="object"
+	mu       sync.RWMutex
+	catalog map[string]int32                     // topic -> partition count (cluster-wide)
+	logs    map[string]map[int32]storage.Backend // topic -> partition -> local log
 
 	// Leader-side replication state (controller mode only), guarded by replMu.
 	replMu    sync.Mutex
@@ -89,17 +91,30 @@ func New(cfg config.Config, cl *cluster.Cluster) (*Broker, error) {
 		logCfg:    storage.Config{SegmentBytes: cfg.SegmentBytes, IndexIntervalBytes: cfg.IndexIntervalBytes},
 		cluster:   cl,
 		catalog:   map[string]int32{},
-		logs:      map[string]map[int32]*storage.Log{},
+		logs:      map[string]map[int32]storage.Backend{},
 		followers: map[tpKey]map[int32]followerProgress{},
 		leadSince: map[tpKey]time.Time{},
 	}
 	if err := os.MkdirAll(cfg.LogDirs, 0o755); err != nil {
 		return nil, err
 	}
-	if err := b.loadExisting(); err != nil {
-		return nil, err
+	// The object backend has no per-partition file dirs to rediscover; its partitions are
+	// opened from the committed FSM placement via reconcileFromFSM after SetController.
+	if cfg.StorageBackend != "object" {
+		if err := b.loadExisting(); err != nil {
+			return nil, err
+		}
 	}
 	return b, nil
+}
+
+// SetObjectStorage installs the node-level object Storage so openLocked returns object-backed
+// logs instead of file logs. Called once at startup, before SetController (which reconciles
+// the partitions this node holds), when StorageBackend=="object".
+func (b *Broker) SetObjectStorage(s *object.Storage) {
+	b.mu.Lock()
+	b.objStore = s
+	b.mu.Unlock()
 }
 
 // Cluster returns the membership/placement view.
@@ -141,7 +156,7 @@ func (b *Broker) leaderAddr(topic string, p int32) (int32, string, bool) {
 }
 
 // replicaLog opens (if needed) and returns this node's local log for a followed partition.
-func (b *Broker) replicaLog(topic string, p int32) (*storage.Log, error) {
+func (b *Broker) replicaLog(topic string, p int32) (storage.Backend, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.openLocked(topic, p)
@@ -198,7 +213,7 @@ func (b *Broker) advanceHighWatermark(topic string, p int32) {
 }
 
 // getLog returns this node's already-open log for a partition, or nil.
-func (b *Broker) getLog(topic string, p int32) *storage.Log {
+func (b *Broker) getLog(topic string, p int32) storage.Backend {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if pm, ok := b.logs[topic]; ok {
@@ -626,7 +641,7 @@ func (b *Broker) EnsureTopic(name string) (int32, error) {
 // LocalLog returns the storage log for (topic, partition), creating it on demand.
 // It returns ErrNotLeader if this broker does not lead the partition, or
 // ErrUnknownPartition if the index is out of range.
-func (b *Broker) LocalLog(topic string, partition int32) (*storage.Log, error) {
+func (b *Broker) LocalLog(topic string, partition int32) (storage.Backend, error) {
 	np := b.NumPartitions(topic)
 	if partition < 0 || partition >= np {
 		return nil, ErrUnknownPartition
@@ -698,13 +713,20 @@ func (b *Broker) Close() error {
 			firstErr = err
 		}
 	}
+	// Per-partition ObjectLog.Close is a no-op; the shared node Storage owns the final
+	// upload of pending data and the WAL, so close it last.
+	if b.objStore != nil {
+		if err := b.objStore.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
-func (b *Broker) snapshotLogs() []*storage.Log {
+func (b *Broker) snapshotLogs() []storage.Backend {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	var out []*storage.Log
+	var out []storage.Backend
 	for _, pm := range b.logs {
 		for _, l := range pm {
 			out = append(out, l)
@@ -730,20 +752,29 @@ func (b *Broker) registerLocked(name string, partitions int32) error {
 	return nil
 }
 
-// openLocked opens (creating files if needed) the log for a led partition. Caller
+// openLocked opens the log for a partition this node holds — an object-backed log when the
+// object backend is installed, otherwise the file log (creating files if needed). Caller
 // holds the write lock.
-func (b *Broker) openLocked(topic string, partition int32) (*storage.Log, error) {
+func (b *Broker) openLocked(topic string, partition int32) (storage.Backend, error) {
 	if pm, ok := b.logs[topic]; ok {
 		if l, ok := pm[partition]; ok {
 			return l, nil
 		}
 	}
-	l, err := storage.Open(b.partitionDir(topic, partition), b.logCfg)
+	var (
+		l   storage.Backend
+		err error
+	)
+	if b.objStore != nil {
+		l, err = b.objStore.Log(topic, partition)
+	} else {
+		l, err = storage.Open(b.partitionDir(topic, partition), b.logCfg)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if b.logs[topic] == nil {
-		b.logs[topic] = map[int32]*storage.Log{}
+		b.logs[topic] = map[int32]storage.Backend{}
 	}
 	b.logs[topic][partition] = l
 	return l, nil

@@ -41,6 +41,15 @@ kafka-console-producer.sh --bootstrap-server localhost:9092 --topic demo
 kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic demo --from-beginning --group g1
 ```
 
+## Observability (Metrics & Dashboards)
+
+`mq` is instrumented with Prometheus metrics covering requests, latency, offsets, and consumer group lag.
+When running with `docker compose up --build`, a full observability stack is launched alongside the broker:
+
+- **Prometheus** scrapes the broker every 5s (accessible at `http://localhost:9095`).
+- **Grafana** provides pre-built dashboards (accessible at `http://localhost:3005`, login as `admin`/`admin` or view anonymously).
+- The raw metrics endpoint is available on the broker at `http://localhost:7080/metrics`.
+
 ## Running a cluster (horizontal scaling)
 
 Give every broker the **same** member list and a unique node id. Partitions are placed

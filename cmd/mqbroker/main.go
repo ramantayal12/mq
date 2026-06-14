@@ -6,18 +6,24 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"mq/internal/broker"
 	"mq/internal/cluster"
 	"mq/internal/config"
 	"mq/internal/controller"
 	"mq/internal/group"
+	"mq/internal/metrics"
 	"mq/internal/server"
+	"mq/internal/storage/object"
 )
 
 func main() {
@@ -51,9 +57,11 @@ func main() {
 
 	// In cluster mode, stand up the Raft metadata controller and route the broker's
 	// placement through its FSM (Phase 2 — see docs/GAPS_PLAN.md). Single-broker mode
-	// keeps the original dependency-light, controller-free path.
+	// keeps the original dependency-light, controller-free path. The object backend keeps
+	// its index in the FSM, so it needs a controller even on a single node.
+	objectBackend := cfg.StorageBackend == "object"
 	var ctrl *controller.Controller
-	if cl.Size() > 1 {
+	if cl.Size() > 1 || objectBackend {
 		ctrl, err = startController(cfg, cl)
 		if err != nil {
 			slog.Error("failed to start controller", "err", err)
@@ -65,6 +73,16 @@ func main() {
 			}
 		}()
 		ctrl.WaitForLeader(10 * time.Second)
+		// The object Storage indexes through the FSM, so build it once the controller has a
+		// leader and install it before SetController reconciles this node's partitions.
+		if objectBackend {
+			objStorage, err := buildObjectStorage(cfg, ctrl)
+			if err != nil {
+				slog.Error("failed to init object storage", "err", err)
+				os.Exit(1)
+			}
+			b.SetObjectStorage(objStorage)
+		}
 		b.SetController(ctrl)
 	}
 
@@ -75,6 +93,25 @@ func main() {
 		"advertised", cfg.AdvertisedHost,
 		"port", cfg.AdvertisedPort,
 		"data", cfg.LogDirs)
+
+	// Register a Prometheus collector that refreshes gauge metrics on each scrape.
+	metrics.RegisterBrokerCollector(func() {
+		refreshGauges(b, coord)
+	})
+
+	// Start the Prometheus /metrics HTTP server if configured.
+	var httpSrv *http.Server
+	if cfg.MetricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		httpSrv = &http.Server{Addr: cfg.MetricsAddr, Handler: mux}
+		go func() {
+			slog.Info("metrics server started", "addr", cfg.MetricsAddr)
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("metrics server failed", "err", err)
+			}
+		}()
+	}
 
 	// Background flush + retention loops.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -97,6 +134,9 @@ func main() {
 	}
 
 	cancel()
+	if httpSrv != nil {
+		httpSrv.Close()
+	}
 	srv.Close()
 	coord.Close()
 	if err := b.FlushAll(); err != nil {
@@ -104,6 +144,35 @@ func main() {
 	}
 	if err := b.Close(); err != nil {
 		slog.Warn("close failed", "err", err)
+	}
+}
+
+// refreshGauges updates Prometheus gauges from broker and coordinator state.
+func refreshGauges(b *broker.Broker, coord *group.Coordinator) {
+	topics := b.KnownTopics()
+	metrics.TopicsTotal.Set(float64(len(topics)))
+	var totalParts int
+	for _, t := range topics {
+		totalParts += int(t.Partitions)
+		for p := int32(0); p < t.Partitions; p++ {
+			pl := metrics.PartitionLabel(p)
+			log, err := b.LocalLog(t.Name, p)
+			if err != nil {
+				continue
+			}
+			metrics.PartitionLEO.WithLabelValues(t.Name, pl).Set(float64(log.LatestOffset()))
+			metrics.PartitionHWM.WithLabelValues(t.Name, pl).Set(float64(log.HighWatermark()))
+			metrics.PartitionSize.WithLabelValues(t.Name, pl).Set(float64(log.Size()))
+		}
+	}
+	metrics.PartitionsTotal.Set(float64(totalParts))
+
+	for _, g := range coord.ListGroups() {
+		desc, ok := coord.DescribeGroup(g.GroupID)
+		if !ok {
+			continue
+		}
+		metrics.GroupMembers.WithLabelValues(g.GroupID).Set(float64(len(desc.Members)))
 	}
 }
 
@@ -126,15 +195,40 @@ func startController(cfg config.Config, cl *cluster.Cluster) (*controller.Contro
 			RPCAddr:  fmt.Sprintf("%s:%d", bi.Host, bi.Port+2),
 		})
 	}
+	// A single-node controller (object backend at cluster size 1) must bootstrap its own
+	// one-server quorum, since no other broker will.
+	bootstrap := cfg.RaftBootstrap || cl.Size() == 1
 	return controller.New(controller.Config{
 		NodeID:    cfg.NodeID,
 		RaftBind:  fmt.Sprintf("%s:%d", listenHost, raftPort),
 		Advertise: fmt.Sprintf("%s:%d", cfg.AdvertisedHost, raftPort),
 		RPCBind:   fmt.Sprintf("%s:%d", listenHost, rpcPort),
 		RaftDir:   filepath.Join(cfg.LogDirs, "raft"),
-		Bootstrap: cfg.RaftBootstrap,
+		Bootstrap: bootstrap,
 		Peers:     peers,
 	}, controller.NewFSM())
+}
+
+// buildObjectStorage constructs the node-level object Storage for the object backend: a minio-go
+// ObjectStore over the configured endpoint/bucket, indexed through the controller's FSM, with a
+// per-node WAL under <log-dirs>/wal.
+func buildObjectStorage(cfg config.Config, ctrl *controller.Controller) (*object.Storage, error) {
+	store, err := object.NewMinIO(object.Config{
+		Endpoint:  cfg.ObjectEndpoint,
+		Bucket:    cfg.ObjectBucket,
+		AccessKey: cfg.ObjectAccessKey,
+		SecretKey: cfg.ObjectSecretKey,
+		Region:    cfg.ObjectRegion,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return object.NewStorage(store, ctrl.IndexStore(), object.StorageConfig{
+		NodeID:      strconv.Itoa(int(cfg.NodeID)),
+		WALDir:      filepath.Join(cfg.LogDirs, "wal"),
+		UploadBytes: cfg.ObjectUploadBytes,
+		UploadMS:    cfg.ObjectUploadMs,
+	})
 }
 
 func retentionLoop(ctx context.Context, b *broker.Broker) {

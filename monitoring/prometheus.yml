@@ -1,0 +1,8 @@
+# Prometheus configuration for mq broker metrics.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: mq
+    static_configs:
+      - targets: ["mq:7080"]

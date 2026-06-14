@@ -39,7 +39,7 @@ const (
 type LeaderResolver func(topic string, p int32) (nodeID int32, addr string, ok bool)
 
 // LogResolver returns the local follower log for a partition (opening it if needed).
-type LogResolver func(topic string, p int32) (*storage.Log, error)
+type LogResolver func(topic string, p int32) (storage.Backend, error)
 
 type tp struct {
 	topic string

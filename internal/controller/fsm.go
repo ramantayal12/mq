@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/hashicorp/raft"
+
+	"mq/internal/storage/object"
 )
 
 // partitionMeta is the authoritative placement of one partition.
@@ -28,6 +31,11 @@ type topicMeta struct {
 // single writer), so application is deterministic across the quorum.
 type metaState struct {
 	Topics map[string]*topicMeta `json:"topics"`
+	// Segments is the object backend's index: each partition's uploaded-object slices,
+	// keyed by segKey(topic, partition). AutoMQ keeps exactly this metadata in the
+	// controller; replicating it through raft makes it durable and cluster-visible. Empty
+	// for the file backend.
+	Segments map[string][]object.SegmentRef `json:"segments,omitempty"`
 }
 
 // FSM is the raft.FSM that owns the cluster metadata. Reads take the read lock; the
@@ -40,7 +48,7 @@ type FSM struct {
 
 // NewFSM returns an empty FSM.
 func NewFSM() *FSM {
-	return &FSM{state: metaState{Topics: map[string]*topicMeta{}}}
+	return &FSM{state: metaState{Topics: map[string]*topicMeta{}, Segments: map[string][]object.SegmentRef{}}}
 }
 
 // SetOnApply registers a callback fired after each committed Apply and each Restore,
@@ -109,6 +117,28 @@ func (f *FSM) applyLocked(cmd Command) error {
 			return err
 		}
 		pm.ISR = append([]int32(nil), cmd.ISR...)
+		return nil
+	case CmdCommitSegment:
+		if cmd.Segment == nil {
+			return fmt.Errorf("controller: commit segment for %q/%d: nil ref", cmd.Topic, cmd.Partition)
+		}
+		k := segKey(cmd.Topic, cmd.Partition)
+		f.state.Segments[k] = append(f.state.Segments[k], *cmd.Segment)
+		return nil
+	case CmdPruneSegments:
+		k := segKey(cmd.Topic, cmd.Partition)
+		refs := f.state.Segments[k]
+		kept := refs[:0]
+		for _, r := range refs {
+			if r.NextOffset > cmd.Cutoff {
+				kept = append(kept, r)
+			}
+		}
+		if len(kept) == 0 {
+			delete(f.state.Segments, k)
+		} else {
+			f.state.Segments[k] = kept
+		}
 		return nil
 	default:
 		return fmt.Errorf("controller: unknown command type %d", cmd.Type)
@@ -216,6 +246,35 @@ func (f *FSM) Topics() []TopicView {
 	return out
 }
 
+// Segments returns a copy of a partition's committed object-index slices (object backend),
+// in commit order. Empty for partitions with no uploaded objects.
+func (f *FSM) Segments(topic string, p int32) []object.SegmentRef {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	refs := f.state.Segments[segKey(topic, p)]
+	out := make([]object.SegmentRef, len(refs))
+	copy(out, refs)
+	return out
+}
+
+// SegmentReferenced reports whether any partition still has a committed ref into the object
+// key — the cluster-wide check the object backend uses before collecting a stream-set object
+// (a single object batches many partitions, and partitions can migrate between nodes).
+func (f *FSM) SegmentReferenced(key string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for _, refs := range f.state.Segments {
+		for _, r := range refs {
+			if r.Key == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func segKey(topic string, p int32) string { return topic + "\x00" + strconv.Itoa(int(p)) }
+
 func viewPart(pm partitionMeta) PartitionView {
 	return PartitionView{
 		Leader:      pm.Leader,
@@ -246,6 +305,9 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	}
 	if st.Topics == nil {
 		st.Topics = map[string]*topicMeta{}
+	}
+	if st.Segments == nil {
+		st.Segments = map[string][]object.SegmentRef{}
 	}
 	f.mu.Lock()
 	f.state = st

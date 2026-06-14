@@ -9,6 +9,7 @@ import (
 	"mq/internal/broker"
 	"mq/internal/group"
 	"mq/internal/kbytes"
+	"mq/internal/metrics"
 	"mq/internal/protocol"
 	"mq/internal/record"
 	"mq/internal/storage"
@@ -43,6 +44,12 @@ func (h *Handler) Dispatch(hdr protocol.RequestHeader, r *kbytes.Reader) (body [
 	if k := hdr.APIKey; k >= 0 && int(k) < len(h.reqCount) {
 		h.reqCount[k].Add(1)
 	}
+	start := time.Now()
+	apiLabel := metrics.APIName(hdr.APIKey)
+	metrics.Requests.WithLabelValues(apiLabel).Inc()
+	defer func() {
+		metrics.RequestLatency.WithLabelValues(apiLabel).Observe(time.Since(start).Seconds())
+	}()
 	v := hdr.APIVersion
 	switch hdr.APIKey {
 	case protocol.APIApiVersions:
@@ -173,7 +180,9 @@ func (h *Handler) produce(version int16, r *kbytes.Reader) ([]byte, bool) {
 	var waits []produceWait
 	for ti := range req.Topics {
 		t := req.Topics[ti]
+		start := time.Now()
 		tr := protocol.ProduceTopicResp{Name: t.Name}
+		var topicBytes int
 		for _, p := range t.Partitions {
 			pr := protocol.ProducePartitionResp{Index: p.Index, BaseOffset: -1}
 			log, code := h.leaderLog(t.Name, p.Index)
@@ -193,12 +202,16 @@ func (h *Handler) produce(version int16, r *kbytes.Reader) ([]byte, bool) {
 				}
 				pr.BaseOffset = base
 				pr.LogStartOffset = log.EarliestOffset()
+				topicBytes += len(p.Records)
 				if req.Acks == -1 && err == nil && base >= 0 {
 					waits = append(waits, produceWait{log: log, target: log.LatestOffset(), ti: ti, pi: len(tr.Partitions)})
 				}
 			}
 			tr.Partitions = append(tr.Partitions, pr)
 		}
+		metrics.ProduceRequests.WithLabelValues(t.Name).Inc()
+		metrics.ProduceBytes.WithLabelValues(t.Name).Add(float64(topicBytes))
+		metrics.ProduceLatency.WithLabelValues(t.Name).Observe(time.Since(start).Seconds())
 		resp.Topics = append(resp.Topics, tr)
 	}
 	if req.Acks == 0 {
@@ -285,8 +298,15 @@ func (h *Handler) fetch(version int16, r *kbytes.Reader) []byte {
 	deadline := time.Now().Add(wait)
 
 	for {
+		start := time.Now()
 		resp, total, hardErr := h.buildFetch(&req, version)
 		if hardErr || total >= int(minBytes) || wait <= 0 || !time.Now().Before(deadline) {
+			// Record per-topic fetch metrics on the final response.
+			for _, t := range req.Topics {
+				metrics.FetchRequests.WithLabelValues(t.Name).Inc()
+				metrics.FetchBytes.WithLabelValues(t.Name).Add(float64(total))
+				metrics.FetchLatency.WithLabelValues(t.Name).Observe(time.Since(start).Seconds())
+			}
 			return encode(func(w *kbytes.Writer) { resp.Encode(w, version) })
 		}
 		remaining := time.Until(deadline)
