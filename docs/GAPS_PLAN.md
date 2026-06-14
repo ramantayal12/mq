@@ -314,6 +314,22 @@ partition's `.log` exists on all three.
 consumers never read past HWM. **Verify:** produce to leader, follower logs converge;
 RF=1 suite unchanged.
 
+> **Status — landed.** New `internal/replication` runs the follower side: one fetcher
+> goroutine per replicated-but-not-led partition acts as a Kafka client (`Fetch` v4 with
+> `ReplicaID = self`) against the FSM leader, appending batches via `storage.Log.AppendReplica`
+> (leader offsets preserved, no re-assignment) and tracking the leader-reported HWM. Storage
+> splits **HWM from LEO**: `nextOffset` stays the LEO, a new `highWatermark` is the committed
+> offset. Unreplicated logs keep `HWM == LEO` (Append advances both), so the entire RF=1 suite
+> is byte-unchanged; an RF>1 partition is put in *hold* mode (`HoldHighWatermark`) where Append
+> moves only the LEO. The **leader** records each follower's fetch offset (`Broker.RecordReplicaFetch`),
+> sets `HWM = min(LEO, min ISR-follower offset)`, and a 1s maintenance loop shrinks/expands the
+> ISR through the controller (`CmdChangeISR`) on a `replicaLagTimeout` rule. Consumer fetches
+> (`ReplicaID < 0`) are clamped to the HWM and `ListOffsets(LATEST)` returns the HWM. Verified by
+> storage unit tests (HWM/LEO split, `AppendReplica` offset preservation/dedup/gap) and
+> `TestFollowerLogsConvergeRF3` (RF=3: every broker's on-disk partition log converges to the same
+> non-empty size, then full consume). **Deferred to Phase 5:** liveness heartbeats and
+> leader-kill failover (the ISR shrink rule here is lag-time-based, not heartbeat-driven).
+
 - **New `internal/replication/`**: per-follower-partition fetcher acting as a Kafka
   client issuing `Fetch` with `ReplicaID = self` against the current leader; re-targets
   when the FSM leader changes.
@@ -331,6 +347,17 @@ RF=1 suite unchanged.
 
 ### Phase 4 — `acks=all` (resolves #6)
 
+> **Status — landed.** `produce` now holds the response for `acks==-1`: after appending,
+> [handlers.go](../internal/server/handlers.go) `awaitCommit` blocks (bounded by the
+> client's produce timeout, capped at `maxProduceWait=5s`, polling like the fetch
+> long-poll) until each partition's `HighWatermark() >= LEO`, then responds; a laggard is
+> flagged `REQUEST_TIMED_OUT` (error 7). At RF=1 `HWM==LEO`, so it returns immediately and
+> the existing produce suite is byte-unchanged. `acks==0`/`acks==1` paths are untouched.
+> Verified by `TestAcksAllCommitsBeforeAckRF3` (RF=3: after Flush, all records are
+> immediately consumable with no convergence wait — the ack *is* the commit) plus the full
+> existing suite (franz-go defaults to `AllISRAcks`, so every RF=1 produce test already
+> exercises the instant path).
+
 **Goal:** `acks=-1` blocks until ISR replicates; RF=1 returns immediately. **Verify:**
 RF=3 acks=all observably waits for followers; RF=1 latency unchanged.
 
@@ -345,6 +372,23 @@ RF=3 acks=all observably waits for followers; RF=1 latency unchanged.
 **Goal:** a dead leader's partitions fail over to an in-sync replica; clients recover
 automatically. **Verify:** RF=3, produce continuously, kill the leader broker →
 survivor elected, zero data loss within ISR, consumers resume.
+
+> **Status — landed.** Liveness rides the existing forwarding RPC as a new `CmdHeartbeat`
+> frame (`controller/liveness.go`): every broker beats the current controller leader each
+> second; the leader records `lastSeen` (soft state, never the raft log). A leader past its
+> grace window that stops hearing from a node within `livenessTimeout` (3s ≈ 3 missed beats)
+> runs `checkFailover` — for every partition whose leader is no longer alive it commits a
+> `CmdChangeLeader` electing the first surviving ISR member, which bumps `LeaderEpoch`
+> (fencing the stale leader) and shrinks the dead node out of the ISR. A fresh controller
+> leader resets `lastSeen` and starts a grace window so it never fails anything over before
+> live nodes can beat. No surviving ISR member ⇒ left leaderless (electing an out-of-sync
+> replica would lose committed data). The new leader inherits the committed offset it held
+> as a follower (storage HWM never moves backward), so failover is data-safe with the
+> existing reconcile/fetch machinery — no broker change was needed. Verified by
+> `TestLeaderFailoverRF3` (RF=3: commit 50 with acks=all, kill the partition leader, the FSM
+> names a survivor, then 25 more produce/consume — asserts the *distinct* set survives, since
+> without an idempotent producer the NOT_LEADER re-route is at-least-once). **Deferred to
+> Phase 6:** custom/expandable partition counts.
 
 - The controller detects the lost heartbeat (Phase 1) → commits a new leader chosen
   from that partition's ISR, bumps `leaderEpoch`, updates the FSM → propagated
@@ -362,6 +406,21 @@ cluster mode, add partitions, confirm convergence.
   `loadExisting` count-from-disk derivation
   ([broker.go:282](../internal/broker/broker.go#L282)), sourcing counts from FSM. Add
   the `CreatePartitions` protocol (API 37, cap ≤1) + handler.
+
+> **Status — landed.** `proposeCreate(name, np)` now threads the requested count through
+> the controller, so `CreateTopics` honors a custom partition count in cluster mode (it was
+> silently clamped to the default before). `CreatePartitions` (API 37, cap ≤1) is wired:
+> `protocol/createpartitions.go` + a `createPartitions` handler call `Broker.CreatePartitions`,
+> which seeds the added partitions' replica sets from the cluster view and commits
+> `CmdCreatePartitions` through the controller (the FSM already grew topics; only the
+> client-facing API was missing). Every broker converges via the existing `reconcileFromFSM`
+> apply hook, opening a log for each new partition it replicates. The `resolveCount` clamp was
+> deleted and `loadExisting` now always recovers counts from disk — both were only reachable
+> on the controller-free path, which is strictly single-node (cluster mode activates whenever
+> `cluster.Size() > 1`), so their multi-node branches were dead. Verified by
+> `TestCustomAndExpandablePartitionsRF3` (create 4≠default, grow to 6, assert all three
+> controllers' FSM counts + per-partition log dirs converge, then produce/consume the grown
+> topic). Full unit + `-tags integration ./...` suites green; the RF=1 path is unchanged.
 
 ---
 

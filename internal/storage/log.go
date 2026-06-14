@@ -6,6 +6,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -34,14 +35,24 @@ func DefaultConfig() Config {
 
 // Log is the append-only commit log for a single partition. Safe for concurrent
 // use: Append takes a write lock, Read takes a read lock.
+//
+// LEO vs. HWM. nextOffset is the log end offset (LEO) — the next offset Append will
+// assign. highWatermark (HWM) is the offset up to which the data is committed (replicated
+// to the in-sync replicas) and therefore readable by consumers. Without replication the
+// two are identical: every append is immediately committed, so Append advances the HWM in
+// lockstep with the LEO. With replication (holdHWM set), Append advances only the LEO; the
+// leader advances the HWM as followers catch up (via SetHighWatermark), and a follower's
+// HWM tracks the value the leader reports in fetch responses.
 type Log struct {
-	dir        string
-	cfg        Config
-	mu         sync.RWMutex
-	segments   []*segment // sorted by baseOffset; last element is active
-	active     *segment
-	nextOffset int64 // next offset to assign == high watermark
-	dirty      bool  // set on append, cleared on Flush (used by the flush ticker)
+	dir           string
+	cfg           Config
+	mu            sync.RWMutex
+	segments      []*segment // sorted by baseOffset; last element is active
+	active        *segment
+	nextOffset    int64 // log end offset (LEO): next offset to assign
+	highWatermark int64 // committed offset: consumers may read below it
+	holdHWM       bool  // replication mode: Append advances LEO only, not HWM
+	dirty         bool  // set on append, cleared on Flush (used by the flush ticker)
 }
 
 // Appender is the minimal write interface handlers depend on (DIP).
@@ -75,6 +86,7 @@ func Open(dir string, cfg Config) (*Log, error) {
 		l.segments = []*segment{seg}
 		l.active = seg
 		l.nextOffset = 0
+		l.highWatermark = 0
 		return l, nil
 	}
 	for _, base := range bases {
@@ -90,6 +102,10 @@ func Open(dir string, cfg Config) (*Log, error) {
 		return nil, err
 	}
 	l.nextOffset = next
+	// Absent a persisted HWM checkpoint, treat the recovered log as fully committed on
+	// open. For a replicated partition the leader/fetcher will re-establish forward
+	// progress from here; for an RF=1 partition HWM == LEO is the steady state anyway.
+	l.highWatermark = next
 	return l, nil
 }
 
@@ -116,8 +132,74 @@ func (l *Log) Append(batch []byte) (int64, error) {
 		return 0, err
 	}
 	l.nextOffset = base + int64(h.RecordCount)
+	if !l.holdHWM {
+		l.highWatermark = l.nextOffset // unreplicated: every append is immediately committed
+	}
 	l.dirty = true
 	return base, nil
+}
+
+// AppendReplica appends a batch received from the partition leader, preserving the
+// leader-assigned base offset (no re-assignment, no CRC recompute — the bytes are already
+// authoritative). It is the follower's write path, used only by the replication fetcher.
+// A batch already present (base below the LEO) is a harmless duplicate and is skipped; a
+// gap (base above the LEO) is rejected so the fetcher can resync. It never advances the
+// HWM: a follower's HWM is set from the leader's reported value via SetHighWatermark.
+func (l *Log) AppendReplica(batch []byte) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	h, err := record.ParseHeader(batch)
+	if err != nil {
+		return 0, err
+	}
+	if h.BaseOffset < l.nextOffset {
+		return l.nextOffset, nil // already replicated this batch
+	}
+	if h.BaseOffset > l.nextOffset {
+		return l.nextOffset, fmt.Errorf("storage: replica gap: batch base %d > log end %d", h.BaseOffset, l.nextOffset)
+	}
+	if l.active.logSize > 0 && l.active.logSize+int32(len(batch)) > l.cfg.SegmentBytes {
+		if err := l.roll(h.BaseOffset); err != nil {
+			return 0, err
+		}
+	}
+	if err := l.active.append(batch, h.BaseOffset); err != nil {
+		return 0, err
+	}
+	l.nextOffset = h.LastOffset() + 1
+	l.dirty = true
+	return l.nextOffset, nil
+}
+
+// HighWatermark returns the committed offset: consumers may read records below it.
+func (l *Log) HighWatermark() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.highWatermark
+}
+
+// SetHighWatermark advances the high watermark to hwm, clamped to never move backward
+// and never exceed the LEO. Used by the leader as in-sync replicas catch up, and by a
+// follower applying the leader-reported HWM from a fetch response.
+func (l *Log) SetHighWatermark(hwm int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if hwm > l.nextOffset {
+		hwm = l.nextOffset
+	}
+	if hwm > l.highWatermark {
+		l.highWatermark = hwm
+	}
+}
+
+// HoldHighWatermark switches the log into replication mode: subsequent appends advance
+// only the LEO, leaving the HWM to be driven by SetHighWatermark. Called once when the
+// broker opens a log for a partition with more than one replica. Idempotent.
+func (l *Log) HoldHighWatermark() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.holdHWM = true
 }
 
 // roll flushes the active segment and starts a new one based at baseOffset.

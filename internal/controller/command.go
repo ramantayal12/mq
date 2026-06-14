@@ -20,6 +20,7 @@ const (
 	CmdCreatePartitions                    // {Topic, Partitions, Replicas} — extend an existing topic
 	CmdChangeLeader                        // {Topic, Partition, Leader, ISR} — bumps LeaderEpoch
 	CmdChangeISR                           // {Topic, Partition, ISR}
+	CmdHeartbeat                           // {From} — liveness ping to the leader; never enters the raft log
 )
 
 // Command is the single, flat mutation applied to the FSM. One struct (rather than a
@@ -34,6 +35,7 @@ type Command struct {
 	Replicas   [][]int32 `json:"replicas,omitempty"` // per-partition replica sets (CreateTopic / CreatePartitions)
 	Leader     int32     `json:"leader,omitempty"`
 	ISR        []int32   `json:"isr,omitempty"`
+	From       int32     `json:"from,omitempty"` // CmdHeartbeat: the heartbeating node (RPC only, never applied)
 }
 
 func (c Command) encode() ([]byte, error) { return json.Marshal(c) }

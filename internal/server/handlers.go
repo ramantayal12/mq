@@ -75,6 +75,8 @@ func (h *Handler) Dispatch(hdr protocol.RequestHeader, r *kbytes.Reader) (body [
 		return h.offsetFetch(v, r), true
 	case protocol.APICreateTopics:
 		return h.createTopics(v, r), true
+	case protocol.APICreatePartitions:
+		return h.createPartitions(v, r), true
 	default:
 		slog.Warn("unsupported api key", "key", hdr.APIKey, "version", v)
 		return nil, false
@@ -166,7 +168,11 @@ func (h *Handler) produce(version int16, r *kbytes.Reader) ([]byte, bool) {
 	req.Decode(r, version)
 
 	resp := protocol.ProduceResponse{}
-	for _, t := range req.Topics {
+	// For acks=all we must hold the response until the data is committed (HWM has caught
+	// up to it). Remember each appended partition's slot in resp and the LEO it reached.
+	var waits []produceWait
+	for ti := range req.Topics {
+		t := req.Topics[ti]
 		tr := protocol.ProduceTopicResp{Name: t.Name}
 		for _, p := range t.Partitions {
 			pr := protocol.ProducePartitionResp{Index: p.Index, BaseOffset: -1}
@@ -187,6 +193,9 @@ func (h *Handler) produce(version int16, r *kbytes.Reader) ([]byte, bool) {
 				}
 				pr.BaseOffset = base
 				pr.LogStartOffset = log.EarliestOffset()
+				if req.Acks == -1 && err == nil && base >= 0 {
+					waits = append(waits, produceWait{log: log, target: log.LatestOffset(), ti: ti, pi: len(tr.Partitions)})
+				}
 			}
 			tr.Partitions = append(tr.Partitions, pr)
 		}
@@ -195,7 +204,63 @@ func (h *Handler) produce(version int16, r *kbytes.Reader) ([]byte, bool) {
 	if req.Acks == 0 {
 		return nil, false // fire-and-forget: no response expected
 	}
+	if req.Acks == -1 {
+		h.awaitCommit(waits, resp.Topics, req.TimeoutMs)
+	}
 	return encode(func(w *kbytes.Writer) { resp.Encode(w, version) }), true
+}
+
+// maxProduceWait caps how long an acks=all produce blocks waiting for the ISR to commit,
+// regardless of the client's request timeout.
+const maxProduceWait = 5 * time.Second
+
+// produceWait records an appended partition the acks=all path must wait on: its log, the
+// LEO it must commit to (target), and its slot in the response (ti/pi) to flag on timeout.
+type produceWait struct {
+	log    logHandle
+	target int64
+	ti     int
+	pi     int
+}
+
+// awaitCommit blocks until every waited partition's high watermark reaches its target
+// offset or the (capped) produce timeout elapses, flagging any laggards REQUEST_TIMED_OUT.
+// At RF=1 the HWM already equals the LEO, so this returns immediately.
+func (h *Handler) awaitCommit(waits []produceWait, topics []protocol.ProduceTopicResp, timeoutMs int32) {
+	if len(waits) == 0 {
+		return
+	}
+	wait := maxProduceWait
+	if timeoutMs > 0 && time.Duration(timeoutMs)*time.Millisecond < wait {
+		wait = time.Duration(timeoutMs) * time.Millisecond
+	}
+	deadline := time.Now().Add(wait)
+	for _, wt := range waits {
+		if committed(wt.log, wt.target, deadline) {
+			continue
+		}
+		pr := &topics[wt.ti].Partitions[wt.pi]
+		pr.ErrorCode = protocol.ErrRequestTimedOut
+		pr.BaseOffset = -1
+	}
+}
+
+// committed polls the log's high watermark until it reaches target or the deadline passes.
+func committed(log logHandle, target int64, deadline time.Time) bool {
+	for {
+		if log.HighWatermark() >= target {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		sleep := 20 * time.Millisecond
+		if remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+	}
 }
 
 // maxFetchWait caps how long a fetch will long-poll, regardless of the client's
@@ -238,6 +303,7 @@ func (h *Handler) fetch(version int16, r *kbytes.Reader) []byte {
 // whether any partition hit a terminal error (e.g. OFFSET_OUT_OF_RANGE) that should
 // end the long-poll immediately rather than wait for data that will never arrive.
 func (h *Handler) buildFetch(req *protocol.FetchRequest, version int16) (resp protocol.FetchResponse, total int, hardErr bool) {
+	isReplica := req.ReplicaID >= 0
 	for _, t := range req.Topics {
 		tr := protocol.FetchTopicResp{Name: t.Name}
 		for _, p := range t.Partitions {
@@ -258,8 +324,18 @@ func (h *Handler) buildFetch(req *protocol.FetchRequest, version int16) (resp pr
 				case err != nil:
 					slog.Warn("fetch read failed", "topic", t.Name, "partition", p.Partition, "err", err)
 				}
-				pr.HighWatermark = log.LatestOffset()
-				pr.LastStable = pr.HighWatermark
+				hwm := log.HighWatermark()
+				if isReplica {
+					// A follower replicating from this leader: serve up to the LEO and record
+					// its progress so the leader can advance the HWM / maintain the ISR.
+					h.broker.RecordReplicaFetch(t.Name, p.Partition, req.ReplicaID, p.FetchOffset)
+				} else {
+					// A consumer may only see committed records: drop anything at or above
+					// the high watermark (it lands on a batch boundary, so this is exact).
+					data = clampToHighWatermark(data, hwm)
+				}
+				pr.HighWatermark = hwm
+				pr.LastStable = hwm
 				pr.LogStartOffset = log.EarliestOffset()
 				pr.Records = data
 				total += len(data)
@@ -269,6 +345,31 @@ func (h *Handler) buildFetch(req *protocol.FetchRequest, version int16) (resp pr
 		resp.Topics = append(resp.Topics, tr)
 	}
 	return resp, total, hardErr
+}
+
+// errClampStop ends the clamp walk once a batch reaches the high watermark.
+var errClampStop = errors.New("clamp: at high watermark")
+
+// clampToHighWatermark trims a record set to the batches lying entirely below hwm. The HWM
+// always sits on a batch boundary (followers replicate whole batches), so a batch is either
+// fully committed (lastOffset < hwm) or not yet — there is never a partial batch to split.
+func clampToHighWatermark(data []byte, hwm int64) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	keep := 0
+	record.Iterate(data, func(batch []byte) error {
+		h, err := record.ParseHeader(batch)
+		if err != nil {
+			return err
+		}
+		if h.LastOffset() >= hwm {
+			return errClampStop
+		}
+		keep += h.TotalSize()
+		return nil
+	})
+	return data[:keep]
 }
 
 func (h *Handler) listOffsets(version int16, r *kbytes.Reader) []byte {
@@ -287,7 +388,7 @@ func (h *Handler) listOffsets(version int16, r *kbytes.Reader) []byte {
 			case p.Timestamp == protocol.TimestampEarliest:
 				pr.Offset = log.EarliestOffset()
 			case p.Timestamp == protocol.TimestampLatest:
-				pr.Offset = log.LatestOffset()
+				pr.Offset = log.HighWatermark() // consumers see up to the committed offset
 			default:
 				// Time-based seek: first offset with timestamp >= the requested time.
 				if off, ok := log.OffsetForTimestamp(p.Timestamp); ok {
@@ -536,6 +637,22 @@ func (h *Handler) createTopics(version int16, r *kbytes.Reader) []byte {
 	return encode(func(w *kbytes.Writer) { resp.Encode(w, version) })
 }
 
+func (h *Handler) createPartitions(version int16, r *kbytes.Reader) []byte {
+	var req protocol.CreatePartitionsRequest
+	req.Decode(r, version)
+	resp := protocol.CreatePartitionsResponse{}
+	for _, t := range req.Topics {
+		tr := protocol.CreatePartitionsTopicResp{Name: t.Name}
+		if err := h.broker.CreatePartitions(t.Name, t.Count); err != nil {
+			tr.ErrorCode = protocol.ErrInvalidPartitions
+			msg := err.Error()
+			tr.ErrorMessage = &msg
+		}
+		resp.Topics = append(resp.Topics, tr)
+	}
+	return encode(func(w *kbytes.Writer) { resp.Encode(w, version) })
+}
+
 // notCoordinator reports whether this broker is NOT the coordinator for the group;
 // when true, group requests are rejected with NOT_COORDINATOR so the client
 // re-discovers the right broker via FindCoordinator.
@@ -564,5 +681,6 @@ type logHandle interface {
 	Read(offset int64, maxBytes int32) ([]byte, error)
 	EarliestOffset() int64
 	LatestOffset() int64
+	HighWatermark() int64
 	OffsetForTimestamp(ts int64) (int64, bool)
 }

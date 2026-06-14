@@ -59,6 +59,15 @@ type Controller struct {
 	rpcLn   net.Listener     // leader-forwarding RPC listener (nil when RPCBind is empty)
 	rpcAddr map[int32]string // node id -> forwarding RPC address (from Peers)
 	rpcWG   sync.WaitGroup
+
+	// Liveness (Phase 5): every broker heartbeats the leader over the forwarding RPC; the
+	// leader tracks lastSeen and fails over partitions led by a node it stops hearing from.
+	// Soft state — never the raft log; only the resulting CmdChangeLeader is committed.
+	liveMu      sync.Mutex
+	lastSeen    map[int32]time.Time
+	leaderSince time.Time     // when this node last became controller leader (failover grace)
+	liveStop    chan struct{} // closed to stop the liveness loop
+	liveDone    chan struct{} // closed when that loop has exited
 }
 
 // New constructs and starts the controller. When cfg.Bootstrap is set and no prior raft
@@ -130,7 +139,7 @@ func New(cfg Config, fsm *FSM) (*Controller, error) {
 		}
 	}
 
-	c := &Controller{nodeID: cfg.NodeID, raft: r, fsm: fsm, trans: trans, store: store, rpcAddr: map[int32]string{}}
+	c := &Controller{nodeID: cfg.NodeID, raft: r, fsm: fsm, trans: trans, store: store, rpcAddr: map[int32]string{}, lastSeen: map[int32]time.Time{}}
 	for _, p := range cfg.Peers {
 		if p.RPCAddr != "" {
 			c.rpcAddr[p.NodeID] = p.RPCAddr
@@ -143,6 +152,7 @@ func New(cfg Config, fsm *FSM) (*Controller, error) {
 			store.Close()
 			return nil, fmt.Errorf("controller: start forwarding rpc: %w", err)
 		}
+		c.startLiveness() // heartbeats + leader-failover ride the forwarding RPC
 	}
 	return c, nil
 }
@@ -226,6 +236,10 @@ func (c *Controller) proposeLocal(cmd Command) error {
 // the transport and store.
 func (c *Controller) Close() error {
 	var firstErr error
+	if c.liveStop != nil {
+		close(c.liveStop)
+		<-c.liveDone
+	}
 	if c.rpcLn != nil {
 		_ = c.rpcLn.Close()
 		c.rpcWG.Wait()

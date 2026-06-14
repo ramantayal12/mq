@@ -236,3 +236,107 @@ func TestFloorPosition(t *testing.T) {
 		t.Fatalf("floor(0)=%d want 0", p)
 	}
 }
+
+// TestHighWatermarkDefaultTracksLEO verifies that without replication every append
+// commits immediately: the high watermark always equals the log end offset.
+func TestHighWatermarkDefaultTracksLEO(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := Open(dir, DefaultConfig())
+	defer l.Close()
+	if l.HighWatermark() != 0 {
+		t.Fatalf("fresh hwm=%d want 0", l.HighWatermark())
+	}
+	l.Append(makeBatch(3, 0)) // 0,1,2
+	l.Append(makeBatch(2, 0)) // 3,4
+	if l.HighWatermark() != l.LatestOffset() || l.HighWatermark() != 5 {
+		t.Fatalf("hwm=%d leo=%d want both 5", l.HighWatermark(), l.LatestOffset())
+	}
+}
+
+// TestHoldHighWatermark verifies replication mode: appends advance only the LEO, and the
+// HWM moves only via SetHighWatermark, clamped to [current, LEO] and monotonic.
+func TestHoldHighWatermark(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := Open(dir, DefaultConfig())
+	defer l.Close()
+	l.HoldHighWatermark()
+
+	l.Append(makeBatch(3, 0)) // LEO 3
+	l.Append(makeBatch(2, 0)) // LEO 5
+	if l.HighWatermark() != 0 {
+		t.Fatalf("held hwm=%d want 0", l.HighWatermark())
+	}
+	l.SetHighWatermark(3)
+	if l.HighWatermark() != 3 {
+		t.Fatalf("hwm=%d want 3", l.HighWatermark())
+	}
+	l.SetHighWatermark(2) // never moves backward
+	if l.HighWatermark() != 3 {
+		t.Fatalf("hwm went backward to %d", l.HighWatermark())
+	}
+	l.SetHighWatermark(100) // never exceeds the LEO
+	if l.HighWatermark() != 5 {
+		t.Fatalf("hwm=%d want clamped to LEO 5", l.HighWatermark())
+	}
+}
+
+// TestAppendReplica verifies a follower preserves the leader's offsets, skips duplicates,
+// rejects gaps, and never advances the HWM on its own.
+func TestAppendReplica(t *testing.T) {
+	dir := t.TempDir()
+	leader, _ := Open(t.TempDir(), DefaultConfig())
+	defer leader.Close()
+	follower, _ := Open(dir, DefaultConfig())
+	defer follower.Close()
+	follower.HoldHighWatermark()
+
+	// Leader assigns offsets; capture its on-disk batches.
+	leader.Append(makeBatch(3, 5)) // 0,1,2
+	leader.Append(makeBatch(2, 5)) // 3,4
+	set, _ := leader.Read(0, 1<<20)
+
+	var batches [][]byte
+	record.Iterate(set, func(b []byte) error {
+		cp := make([]byte, len(b))
+		copy(cp, b)
+		batches = append(batches, cp)
+		return nil
+	})
+	if len(batches) != 2 {
+		t.Fatalf("got %d batches", len(batches))
+	}
+
+	leo, err := follower.AppendReplica(batches[0])
+	if err != nil || leo != 3 {
+		t.Fatalf("replica append1 leo=%d err=%v", leo, err)
+	}
+	// Duplicate is a no-op.
+	if leo, err := follower.AppendReplica(batches[0]); err != nil || leo != 3 {
+		t.Fatalf("duplicate replica append leo=%d err=%v", leo, err)
+	}
+	// Gap is rejected (skipping batches[1] base 3 is fine; jumping ahead is not).
+	gap := makeBatch(1, 0)
+	binary.BigEndian.PutUint64(gap[0:], 9) // base 9, far ahead
+	record.RecomputeCRC(gap)
+	if _, err := follower.AppendReplica(gap); err == nil {
+		t.Fatal("expected gap rejection")
+	}
+	if leo, err := follower.AppendReplica(batches[1]); err != nil || leo != 5 {
+		t.Fatalf("replica append2 leo=%d err=%v", leo, err)
+	}
+	if follower.HighWatermark() != 0 {
+		t.Fatalf("follower hwm=%d want 0 (only SetHighWatermark advances it)", follower.HighWatermark())
+	}
+
+	// Offsets match the leader's exactly.
+	out, _ := follower.Read(0, 1<<20)
+	var bases []int64
+	record.Iterate(out, func(b []byte) error {
+		h, _ := record.ParseHeader(b)
+		bases = append(bases, h.BaseOffset)
+		return nil
+	})
+	if len(bases) != 2 || bases[0] != 0 || bases[1] != 3 {
+		t.Fatalf("follower bases=%v want [0 3]", bases)
+	}
+}

@@ -15,8 +15,10 @@ import (
 // follower forwards the command here to the leader's RPC address (client port + 2). This
 // keeps private controller traffic off the Kafka port and out of the raft log itself.
 //
-// Liveness heartbeats (the other half of GAPS_PLAN §1d) ride no RPC yet: they exist only
-// to drive failover detection, which lands with Phase 5, so they are deferred to it.
+// Liveness heartbeats (the other half of GAPS_PLAN §1d) ride this same RPC as a
+// CmdHeartbeat frame: every broker beats the leader, which records lastSeen and fails over
+// partitions led by a node it stops hearing from (see liveness.go). Heartbeats are soft
+// state — recorded directly, never proposed to the raft log.
 
 const (
 	rpcMaxFrame = 1 << 20 // a metadata command is tiny; cap defensively
@@ -68,6 +70,8 @@ func (c *Controller) serveRPCConn(conn net.Conn) {
 	switch {
 	case err != nil:
 		res.Error = fmt.Sprintf("controller: undecodable forwarded command: %v", err)
+	case cmd.Type == CmdHeartbeat:
+		c.recordHeartbeat(cmd.From) // soft liveness state, never proposed to raft
 	default:
 		if applyErr := c.proposeLocal(cmd); applyErr != nil {
 			res.Error = applyErr.Error()
