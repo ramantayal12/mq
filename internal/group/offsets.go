@@ -74,6 +74,26 @@ func (s *OffsetStore) Fetch(group, topic string, partition int32) (offset int64,
 	return c.offset, c.metadata, true
 }
 
+// CommittedOffset is a single committed position, returned by ListCommitted.
+type CommittedOffset struct {
+	Group     string
+	Topic     string
+	Partition int32
+	Offset    int64
+}
+
+// ListCommitted returns every committed offset currently in the store. Used by the
+// metrics collector to compute per-group lag.
+func (s *OffsetStore) ListCommitted() []CommittedOffset {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]CommittedOffset, 0, len(s.cache))
+	for k, v := range s.cache {
+		out = append(out, CommittedOffset{k.group, k.topic, k.partition, v.offset})
+	}
+	return out
+}
+
 func encodeCommit(offset int64, metadata string) []byte {
 	b := make([]byte, 12+len(metadata))
 	binary.BigEndian.PutUint64(b[0:], uint64(offset))

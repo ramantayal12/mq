@@ -21,6 +21,7 @@ for the big picture and [docs/LLD.md](docs/LLD.md) for byte-level detail.
 | [internal/server/](internal/server/) | `server.go` (TCP accept + frame loop), `handlers.go` (the glue: decode → broker/storage/group → encode; `produce` honors `acks=all` — `awaitCommit` blocks until each partition's HWM reaches its LEO or the timeout elapses, instant at RF=1), `integration_test.go` (franz-go, `-tags integration`). |
 | [internal/metrics/](internal/metrics/) | Prometheus metrics registry (`metrics.go`), counters, histograms, gauges, and offset collectors. |
 | [monitoring/](monitoring/) | Docker Compose observability stack configs: `prometheus.yml` and pre-built Grafana dashboards. |
+| [test/](test/) | Black-box functional tests (`-tags functional`) that spawn the **real `mqbroker` binary** and drive it with franz-go (distinct from `internal/server/integration_test.go`, which boots in-process). One responsibility per package: `test/harness/` = reusable spawn/cluster/load/scrape helpers (no `testing` dep; builds the binary, allocates non-overlapping Kafka/raft/rpc port triples, spawns single node or N-node RF Raft cluster with `Kill`, generates sustained bursty load, scrapes `/metrics` with a priming read since gauges refresh lazily on scrape); `test/smoke/` = produce/consume round-trip + group commit/resume + `/metrics` series check; `test/load/` = sustained multi-topic/multi-group load (set `MQ_FUNC_ADDR`+`LOAD_DURATION` to drive the docker-compose stack and watch Grafana); `test/failover/` = 3-node RF=3, kill a broker, assert committed data still readable + new writes succeed. `MQ_FUNC_ADDR` targets an external broker; `run.sh` is the runner. |
 
 ## Protocol files (internal/protocol)
 
@@ -65,6 +66,7 @@ for the big picture and [docs/LLD.md](docs/LLD.md) for byte-level detail.
 ```bash
 go run ./cmd/mqbroker            # start broker (./data, :9092)
 go test ./...                    # unit tests
-go test -tags integration ./...  # franz-go wire-compat tests
+go test -tags integration ./...  # franz-go wire-compat tests (in-process broker)
+go test -tags functional ./test/ # franz-go functional tests (spawns the real binary)
 docker compose up --build        # containerized, port 9092
 ```

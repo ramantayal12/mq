@@ -152,6 +152,9 @@ func refreshGauges(b *broker.Broker, coord *group.Coordinator) {
 	topics := b.KnownTopics()
 	metrics.TopicsTotal.Set(float64(len(topics)))
 	var totalParts int
+	// leo caches each partition's log-end offset so group-lag can be computed without
+	// re-opening logs below.
+	leo := map[string]int64{}
 	for _, t := range topics {
 		totalParts += int(t.Partitions)
 		for p := int32(0); p < t.Partitions; p++ {
@@ -160,7 +163,9 @@ func refreshGauges(b *broker.Broker, coord *group.Coordinator) {
 			if err != nil {
 				continue
 			}
-			metrics.PartitionLEO.WithLabelValues(t.Name, pl).Set(float64(log.LatestOffset()))
+			end := log.LatestOffset()
+			leo[t.Name+"/"+pl] = end
+			metrics.PartitionLEO.WithLabelValues(t.Name, pl).Set(float64(end))
 			metrics.PartitionHWM.WithLabelValues(t.Name, pl).Set(float64(log.HighWatermark()))
 			metrics.PartitionSize.WithLabelValues(t.Name, pl).Set(float64(log.Size()))
 		}
@@ -173,6 +178,20 @@ func refreshGauges(b *broker.Broker, coord *group.Coordinator) {
 			continue
 		}
 		metrics.GroupMembers.WithLabelValues(g.GroupID).Set(float64(len(desc.Members)))
+	}
+
+	// Per-group lag = log-end offset minus the group's committed offset, per partition.
+	for _, c := range coord.Store().ListCommitted() {
+		pl := metrics.PartitionLabel(c.Partition)
+		end, ok := leo[c.Topic+"/"+pl]
+		if !ok {
+			continue // partition not led here (or unknown); skip
+		}
+		lag := end - c.Offset
+		if lag < 0 {
+			lag = 0
+		}
+		metrics.GroupLag.WithLabelValues(c.Group, c.Topic, pl).Set(float64(lag))
 	}
 }
 

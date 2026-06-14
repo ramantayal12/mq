@@ -5,6 +5,7 @@ services:
   mq:
     build: .
     image: mq:latest
+    user: "0"
     ports:
       - "9092:9092"
       - "7080:7080"
